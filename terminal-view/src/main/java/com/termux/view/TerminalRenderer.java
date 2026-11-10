@@ -399,10 +399,11 @@ public final class TerminalRenderer {
             cellsWide++;
         }
 
-        final float left = column * mFontWidth;
+        final float left = column * mFontWidth + terminalBitmap.getPixelOffsetX();
+        final float top = rowTop + terminalBitmap.getPixelOffsetY();
         mBitmapSrcRect.set(bitmapCellX * cellWidth, bitmapCellY * cellHeight,
             (bitmapCellX + cellsWide) * cellWidth, (bitmapCellY + 1) * cellHeight);
-        mBitmapDestRect.set(left, rowTop, left + cellsWide * mFontWidth, rowTop + mFontLineSpacing);
+        mBitmapDestRect.set(left, top, left + cellsWide * mFontWidth, top + mFontLineSpacing);
         canvas.drawBitmap(bitmap, mBitmapSrcRect, mBitmapDestRect, null);
         return cellsWide;
     }

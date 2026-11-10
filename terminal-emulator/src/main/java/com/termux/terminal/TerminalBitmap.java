@@ -139,6 +139,17 @@ public class TerminalBitmap {
 
     protected int[] mCursorDelta;
 
+    /**
+     * The x-offset in pixels within the first cell at which to start drawing the bitmap.
+     *
+     * Only used for images received via the kitty graphics protocol, which allows an image to be
+     * displayed at a pixel offset within its first cell, see the `X` and `Y` keys.
+     */
+    protected int mPixelOffsetX;
+
+    /** The y-offset in pixels within the first cell at which to start drawing the bitmap. */
+    protected int mPixelOffsetY;
+
 
     protected TerminalBitmap(TerminalSessionClient client, int bitmapNum, Bitmap bitmap,
                              int cellWidth, int cellHeight,
@@ -420,6 +431,26 @@ public class TerminalBitmap {
 
     public void setCursorDelta(int[] cursorDelta) {
         mCursorDelta = cursorDelta;
+    }
+
+
+    public int getPixelOffsetX() {
+        return mPixelOffsetX;
+    }
+
+    public int getPixelOffsetY() {
+        return mPixelOffsetY;
+    }
+
+    /**
+     * Set the pixel offsets within the first cell at which to start drawing the bitmap.
+     *
+     * @param pixelOffsetX The x-offset in pixels, which is clamped to the cell width.
+     * @param pixelOffsetY The y-offset in pixels, which is clamped to the cell height.
+     */
+    public void setPixelOffsets(int pixelOffsetX, int pixelOffsetY) {
+        mPixelOffsetX = Math.max(0, Math.min(pixelOffsetX, mCellWidth - 1));
+        mPixelOffsetY = Math.max(0, Math.min(pixelOffsetY, mCellHeight - 1));
     }
 
 

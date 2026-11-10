@@ -6,6 +6,9 @@ import android.util.Base64;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -381,6 +384,26 @@ public final class TerminalEmulator {
 
     /** The total size of the {@link Bitmap} images in {@link #mKittyImages}. */
     private long mKittyImagesSize = 0;
+
+    /**
+     * The map for image number to the id of the newest image transmitted with that number.
+     *
+     * The client can transmit images by number with the `I` key instead of by id, and the terminal
+     * allocates an id for the image and replies with it. Commands that refer to the image by number
+     * always act on the newest image with that number.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#requesting-image-ids-from-the-terminal
+     */
+    private final HashMap<Integer, Integer> mKittyImageNumbers = new HashMap<>();
+
+    /** The next image id to use for an image transmitted by the kitty graphics protocol. */
+    private int mNextKittyImageId = 1;
+
+    /**
+     * The ids of the images transmitted by the kitty graphics protocol with the transient usage
+     * hint set (`N=1`), which are evicted before other images when the storage quota is reached.
+     */
+    private final HashSet<Integer> mKittyImagesTransient = new HashSet<>();
 
     /** The placements of the images transmitted by the kitty graphics protocol on the screen. */
     private final ArrayList<KittyPlacement> mKittyPlacements = new ArrayList<>();
@@ -2814,14 +2837,21 @@ public final class TerminalEmulator {
         }
 
         Bitmap bitmap = graphics.getBitmap();
-        int imageId = graphics.getImageId();
+        int imageId = getKittyGraphicsImageId(graphics);
+
+        // The terminal allocates the id for an image transmitted with an image number instead of
+        // an id, and replies with both the id and the number.
+        if (imageId <= 0 && graphics.getImageNumber() > 0) {
+            imageId = allocateKittyGraphicsImageId(graphics.getImageNumber());
+            graphics.setImageId(imageId);
+        }
 
         if (imageId > 0) {
             // The existing image and all its placements must be deleted when image data is
             // re-transmitted for an id.
             deleteKittyImage(imageId, /* deletePlacements */ true);
 
-            if (!putKittyImage(imageId, bitmap)) {
+            if (!putKittyImage(imageId, bitmap, graphics.isTransient())) {
                 sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOSPC + ":Failed to store the image");
                 return;
             }
@@ -2836,7 +2866,7 @@ public final class TerminalEmulator {
      * Process the {@link TerminalKittyGraphics#ACTION_DISPLAY} action.
      */
     private void processKittyGraphicsDisplay(TerminalKittyGraphics graphics) {
-        int imageId = graphics.getImageId();
+        int imageId = getKittyGraphicsImageId(graphics);
         Bitmap bitmap = imageId > 0 ? mKittyImages.get(imageId) : null;
 
         if (bitmap == null) {
@@ -2845,15 +2875,23 @@ public final class TerminalEmulator {
             return;
         }
 
+        // A placement with the same image id and placement id replaces the existing one, which
+        // allows a placement to be resized or moved without flicker.
+        if (imageId > 0 && graphics.getPlacementId() > 0) {
+            deleteKittyPlacements(imageId, graphics.getPlacementId(), null, null, null, null, null);
+        }
+
         if (!displayKittyImage(graphics, bitmap)) return;
 
         sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
     }
 
     /**
-     * Process the {@link TerminalKittyGraphics#ACTION_QUERY} action. Only the support for the
-     * image formats and transmission mediums are queried, feature queries are not supported and
-     * are replied to without the `e` key as is allowed by the protocol.
+     * Process the {@link TerminalKittyGraphics#ACTION_QUERY} action, which checks the support for
+     * the image formats and transmission mediums, and for the protocol features when the `e` key
+     * is set.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#querying-support-for-protocol-features
      */
     private void processKittyGraphicsQuery(TerminalKittyGraphics graphics) {
         char medium = graphics.getMedium();
@@ -2874,7 +2912,95 @@ public final class TerminalEmulator {
             return;
         }
 
-        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+        sendKittyGraphicsResponse(graphics, getKittyGraphicsFeatureQueryResponse(graphics),
+            TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Get the control data to include in the response of a feature query, which contains the `e`
+     * key and every key of the query that is supported for the queried action and has a
+     * non-default value. If the queried action itself is not supported, then no keys are included,
+     * since a missing `e` key in the response means the action is not supported.
+     */
+    private String getKittyGraphicsFeatureQueryResponse(TerminalKittyGraphics graphics) {
+        char action = graphics.getFeatureQueryAction();
+        if (action == 0) return null;
+
+        String supportedKeys = getKittyGraphicsSupportedKeys(action);
+        if (supportedKeys.length() < 1) return null;
+
+        StringBuilder controlData = new StringBuilder("e=").append(action);
+        for (Map.Entry<Character, String> entry : graphics.getSpecifiedKeys().entrySet()) {
+            char key = entry.getKey();
+            String value = entry.getValue();
+
+            if (supportedKeys.indexOf(key) < 0) continue;
+            if (value.equals(getKittyGraphicsKeyDefaultValue(key))) continue;
+            if (!isKittyGraphicsKeyValueSupported(key, value)) continue;
+
+            controlData.append(',').append(key);
+            if (value.length() > 0) controlData.append('=').append(value);
+        }
+
+        return controlData.toString();
+    }
+
+    /**
+     * Whether a value of a kitty graphics key is supported, for keys that only support a few values.
+     */
+    private boolean isKittyGraphicsKeyValueSupported(char key, String value) {
+        switch (key) {
+            case 'f':
+                return value.equals(String.valueOf(TerminalKittyGraphics.FORMAT_RGB)) ||
+                    value.equals(String.valueOf(TerminalKittyGraphics.FORMAT_RGBA)) ||
+                    value.equals(String.valueOf(TerminalKittyGraphics.FORMAT_PNG));
+            case 't':
+                return value.equals(String.valueOf(TerminalKittyGraphics.MEDIUM_DIRECT)) ||
+                    value.equals(String.valueOf(TerminalKittyGraphics.MEDIUM_FILE)) ||
+                    value.equals(String.valueOf(TerminalKittyGraphics.MEDIUM_TEMP_FILE));
+            case 'o':
+                return value.equals(String.valueOf(TerminalKittyGraphics.COMPRESSION_ZLIB));
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * Get the keys that are supported for an action, in the format used by feature query responses.
+     */
+    private String getKittyGraphicsSupportedKeys(char action) {
+        switch (action) {
+            case TerminalKittyGraphics.ACTION_TRANSMIT:
+            case TerminalKittyGraphics.ACTION_TRANSMIT_AND_DISPLAY:
+            case TerminalKittyGraphics.ACTION_DISPLAY:
+                return "ftsvSOopcrCxywhXYN";
+            case TerminalKittyGraphics.ACTION_DELETE:
+                return "dpxyz";
+            case TerminalKittyGraphics.ACTION_QUERY:
+                return "e";
+            default:
+                // Animation (`f`, `a`, `c`) is not supported.
+                return "";
+        }
+    }
+
+    /**
+     * Get the default value of a kitty graphics key, which is not included in feature query
+     * responses.
+     */
+    private String getKittyGraphicsKeyDefaultValue(char key) {
+        switch (key) {
+            case 'f':
+                return String.valueOf(TerminalKittyGraphics.DEFAULT_FORMAT);
+            case 't':
+                return String.valueOf(TerminalKittyGraphics.DEFAULT_MEDIUM);
+            case 'd':
+                return String.valueOf(TerminalKittyGraphics.DEFAULT_DELETE);
+            case 'o':
+                return "";
+            default:
+                return "0";
+        }
     }
 
     /**
@@ -2903,7 +3029,8 @@ public final class TerminalEmulator {
         int row = mCursorRow;
 
         TerminalBitmap terminalBitmap = mScreen.addTerminalBitmapForKittyImage(
-            bitmap, column, row, mCellWidthPixels, mCellHeightPixels);
+            bitmap, column, row, mCellWidthPixels, mCellHeightPixels,
+            graphics.getCellPixelOffsetX(), graphics.getCellPixelOffsetY());
         if (terminalBitmap == null) {
             sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOSPC +
                 ":Failed to create the image bitmap, the image may be too large");
@@ -2913,7 +3040,7 @@ public final class TerminalEmulator {
         int placedColumns = Math.max(1, (terminalBitmap.getBitmap().getWidth() + mCellWidthPixels - 1) / mCellWidthPixels);
         int placedRows = Math.max(1, (terminalBitmap.getBitmap().getHeight() + mCellHeightPixels - 1) / mCellHeightPixels);
 
-        mKittyPlacements.add(new KittyPlacement(graphics.getImageId(), graphics.getPlacementId(),
+        mKittyPlacements.add(new KittyPlacement(getKittyGraphicsImageId(graphics), graphics.getPlacementId(),
             mScreen, terminalBitmap.getBitmapNum(), graphics.getZIndex(),
             column + 1, row + 1, placedColumns, placedRows));
 
@@ -3047,7 +3174,7 @@ public final class TerminalEmulator {
         boolean shouldFreeImageData = Character.isUpperCase(specifier);
         char delete = Character.toLowerCase(specifier);
 
-        int imageId = graphics.getImageId();
+        int imageId = getKittyGraphicsImageId(graphics);
         int placementId = graphics.getPlacementId();
 
         switch (delete) {
@@ -3056,8 +3183,16 @@ public final class TerminalEmulator {
                 if (shouldFreeImageData) clearKittyImages();
                 break;
             case TerminalKittyGraphics.DELETE_BY_IMAGE_ID:
-                deleteKittyPlacements(imageId, placementId, null, null, null, null, null);
-                if (shouldFreeImageData) deleteKittyImage(imageId, /* deletePlacements */ false);
+                if (imageId > 0) {
+                    deleteKittyPlacements(imageId, placementId, null, null, null, null, null);
+                    if (shouldFreeImageData) deleteKittyImage(imageId, /* deletePlacements */ false);
+                }
+                break;
+            case TerminalKittyGraphics.DELETE_BY_IMAGE_NUMBER:
+                if (imageId > 0) {
+                    deleteKittyPlacements(imageId, placementId, null, null, null, null, null);
+                    if (shouldFreeImageData) deleteKittyImage(imageId, /* deletePlacements */ false);
+                }
                 break;
             case TerminalKittyGraphics.DELETE_INTERSECTING_CURSOR:
                 deleteKittyPlacements(null, 0, mCursorCol + 1, mCursorRow + 1, null, null, null);
@@ -3131,12 +3266,52 @@ public final class TerminalEmulator {
     }
 
     /**
+     * Get the image id that a command refers to, resolving the image number to the id of the newest
+     * image transmitted with that number if the command did not specify an id.
+     *
+     * @return Returns the image id, or {@code 0} if the command does not refer to an image id.
+     */
+    private int getKittyGraphicsImageId(TerminalKittyGraphics graphics) {
+        int imageId = graphics.getImageId();
+        if (imageId > 0) return imageId;
+
+        int imageNumber = graphics.getImageNumber();
+        if (imageNumber > 0) {
+            Integer resolvedImageId = mKittyImageNumbers.get(imageNumber);
+            if (resolvedImageId != null) return resolvedImageId;
+        }
+
+        return 0;
+    }
+
+    /**
+     * Allocate a new image id for an image transmitted with an image number, and record the number
+     * as referring to the new image.
+     *
+     * @param imageNumber The image number the image was transmitted with.
+     * @return Returns the allocated image id.
+     */
+    private int allocateKittyGraphicsImageId(int imageNumber) {
+        while (mKittyImages.containsKey(mNextKittyImageId)) {
+            mNextKittyImageId++;
+            if (mNextKittyImageId < 1) mNextKittyImageId = 1;
+        }
+
+        int imageId = mNextKittyImageId++;
+        mKittyImageNumbers.put(imageNumber, imageId);
+
+        return imageId;
+    }
+
+    /**
      * Store the image data of an image transmitted for an id, evicting older images if the storage
      * quota is reached.
      *
+     * @param isTransient Whether the client hinted that the image is only used for a short time,
+     *                    in which case it is evicted before other images.
      * @return Returns {@code true} if the image was stored, otherwise {@code false}.
      */
-    private boolean putKittyImage(int imageId, Bitmap bitmap) {
+    private boolean putKittyImage(int imageId, Bitmap bitmap, boolean isTransient) {
         long imageSize = bitmap.getByteCount();
 
         if (imageSize > KITTY_IMAGES_MAX_SIZE) {
@@ -3145,9 +3320,11 @@ public final class TerminalEmulator {
             return false;
         }
 
+        if (isTransient) mKittyImagesTransient.add(imageId);
+        else mKittyImagesTransient.remove(imageId);
+
         while (!mKittyImages.isEmpty() &&
             (mKittyImages.size() + 1 > KITTY_IMAGES_MAX_COUNT || mKittyImagesSize + imageSize > KITTY_IMAGES_MAX_SIZE)) {
-            // Evict the images that are not placed on the screen first, otherwise the least recently used one.
             Integer imageIdToRemove = getKittyImageIdToEvict();
             if (imageIdToRemove == null) break;
             deleteKittyImage(imageIdToRemove, /* deletePlacements */ true);
@@ -3161,10 +3338,16 @@ public final class TerminalEmulator {
     }
 
     /**
-     * Get the id of the image that should be evicted when the storage quota is reached, which is an
-     * image that is not placed on the screen, or the least recently used one.
+     * Get the id of the image that should be evicted when the storage quota is reached. Images that
+     * are only used for a short time and are not placed on the screen are evicted first, then the
+     * images that are not placed on the screen, and finally the least recently used image.
      */
     private Integer getKittyImageIdToEvict() {
+        for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
+            if (mKittyImagesTransient.contains(entry.getKey()) && !isKittyImagePlaced(entry.getKey()))
+                return entry.getKey();
+        }
+
         for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
             if (!isKittyImagePlaced(entry.getKey())) return entry.getKey();
         }
@@ -3193,6 +3376,14 @@ public final class TerminalEmulator {
 
         Bitmap bitmap = mKittyImages.remove(imageId);
         if (bitmap != null) mKittyImagesSize -= bitmap.getByteCount();
+
+        mKittyImagesTransient.remove(imageId);
+
+        // Remove the image numbers that referred to the deleted image.
+        Iterator<Map.Entry<Integer, Integer>> iterator = mKittyImageNumbers.entrySet().iterator();
+        while (iterator.hasNext()) {
+            if (iterator.next().getValue() == imageId) iterator.remove();
+        }
     }
 
     /** Clear all the images transmitted by the kitty graphics protocol and their placements. */
@@ -3222,6 +3413,9 @@ public final class TerminalEmulator {
     private void clearKittyImages() {
         mKittyImages.clear();
         mKittyImagesSize = 0;
+        mKittyImageNumbers.clear();
+        mKittyImagesTransient.clear();
+        mNextKittyImageId = 1;
     }
 
     /**
@@ -3229,6 +3423,20 @@ public final class TerminalEmulator {
      * responses have been suppressed with the `q` key.
      */
     private void sendKittyGraphicsResponse(TerminalKittyGraphics graphics, String response) {
+        sendKittyGraphicsResponse(graphics, null, response);
+    }
+
+    /**
+     * Send a response to the application for a kitty graphics protocol command, unless the
+     * responses have been suppressed with the `q` key.
+     *
+     * @param graphics The command that the response is being sent for.
+     * @param extraControlData Additional control data to include in the response, like the keys
+     *                         reported for a feature query, or {@code null}.
+     * @param response The response to send, like {@link TerminalKittyGraphics#RESPONSE_OK} or an
+     *                 error response.
+     */
+    private void sendKittyGraphicsResponse(TerminalKittyGraphics graphics, String extraControlData, String response) {
         if (response == null) response = TerminalKittyGraphics.RESPONSE_OK;
 
         boolean isOk = response.startsWith(TerminalKittyGraphics.RESPONSE_OK);
@@ -3238,16 +3446,20 @@ public final class TerminalEmulator {
         StringBuilder command = new StringBuilder("\033_G");
         if (graphics.getImageId() > 0) {
             command.append("i=").append(graphics.getImageId());
+            if (graphics.getImageNumber() > 0) command.append(",I=").append(graphics.getImageNumber());
             if (graphics.getPlacementId() > 0) command.append(",p=").append(graphics.getPlacementId());
         } else if (graphics.getImageNumber() > 0) {
             command.append("I=").append(graphics.getImageNumber());
         }
-        if (command.length() > 3) command.append(";").append(response);
-        else command.setLength(0);
 
-        if (command.length() < 1) return;
+        if (extraControlData != null && extraControlData.length() > 0) {
+            if (command.length() > 3) command.append(',');
+            command.append(extraControlData);
+        }
 
-        command.append("\033\\");
+        if (command.length() <= 3) return;
+
+        command.append(';').append(response).append("\033\\");
         mSession.write(command.toString());
     }
 

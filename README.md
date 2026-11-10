@@ -20,6 +20,7 @@ The fork adds two commits on top of upstream: `108f11d5` (*rendering optimizatio
 **Kitty graphics protocol**
 
 - `APC ESC_G` images with actions `t`/`T`/`p`/`d`/`q`, PNG plus raw RGB/RGBA, chunked transfer (`m=1`), zlib (`o=z`) and file transfer (`t=f`/`t=t`).
+- Image numbers (`I=`), feature queries (`e=`), pixel offsets (`X`/`Y`), placement ids (`p=`) and usage hints (`N=`) are supported, as are all the delete specifiers.
 - Off by default. Enable it in `~/.termux/termux.properties`:
 
   ```properties

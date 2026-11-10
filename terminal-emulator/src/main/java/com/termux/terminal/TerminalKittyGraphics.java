@@ -11,6 +11,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.zip.Inflater;
 
 /**
@@ -93,6 +95,7 @@ public class TerminalKittyGraphics {
 
     public static final char DELETE_ALL = 'a';
     public static final char DELETE_BY_IMAGE_ID = 'i';
+    public static final char DELETE_BY_IMAGE_NUMBER = 'n';
     public static final char DELETE_INTERSECTING_CURSOR = 'c';
     public static final char DELETE_INTERSECTING_CELL = 'p';
     public static final char DELETE_INTERSECTING_CELL_WITH_Z_INDEX = 'q';
@@ -149,7 +152,12 @@ public class TerminalKittyGraphics {
 
     /** The `i` key, the image id. */
     private int mImageId = 0;
-    /** The `I` key, the image number. Not supported and only used to reply to the application. */
+    /**
+     * The `I` key, the image number, which is resolved to the id of the newest image transmitted
+     * with that number.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#requesting-image-ids-from-the-terminal
+     */
     private int mImageNumber = 0;
     /** The `p` key, the placement id. */
     private int mPlacementId = 0;
@@ -212,6 +220,21 @@ public class TerminalKittyGraphics {
 
     /** The `d` key, what to delete for the {@link #ACTION_DELETE} action. */
     private char mDeleteSpecifier = DEFAULT_DELETE;
+
+    /** The `e` key, the action to query the support of, only allowed for the {@link #ACTION_QUERY} action. */
+    private char mFeatureQueryAction = 0;
+
+    /**
+     * The `N` key, the usage hints from the client. `1` means the image is expected to be used for
+     * only a short time and can be evicted before other images when the storage quota is reached.
+     */
+    private int mUsageHints = 0;
+
+    /**
+     * The `key=value` pairs of the command that have a non-default value, excluding the `a`, `i`,
+     * `I`, `m`, `q` and `e` keys, which are never included in a feature query response.
+     */
+    private final LinkedHashMap<Character, String> mSpecifiedKeys = new LinkedHashMap<>();
 
     /** The `base64` encoded image data collected for the current image, for all chunks received. */
     private final StringBuilder mEncodedData = new StringBuilder(/* Initial capacity. */ 4096);
@@ -341,6 +364,33 @@ public class TerminalKittyGraphics {
 
     public char getDeleteSpecifier() {
         return mDeleteSpecifier;
+    }
+
+    public char getFeatureQueryAction() {
+        return mFeatureQueryAction;
+    }
+
+    public int getUsageHints() {
+        return mUsageHints;
+    }
+
+    /** Whether the client has hinted that the image is only used for a short time, i.e. `N=1`. */
+    public boolean isTransient() {
+        return (mUsageHints & 1) == 1;
+    }
+
+    /** The `key=value` pairs of the command that have a non-default value, for feature query responses. */
+    public Map<Character, String> getSpecifiedKeys() {
+        return mSpecifiedKeys;
+    }
+
+
+    /**
+     * Set the image id of the command, which is used to reply with the id that the terminal
+     * allocated for an image that was transmitted with an image number instead of an id.
+     */
+    public void setImageId(int imageId) {
+        mImageId = imageId;
     }
 
 
@@ -571,20 +621,54 @@ public class TerminalKittyGraphics {
             case 'd':
                 mDeleteSpecifier = parseChar(value);
                 break;
+            case 'e':
+                mFeatureQueryAction = parseChar(value);
+                break;
+            case 'N':
+                mUsageHints = parseInt(value, "N", 0);
+                break;
             default:
-                // Keys like `N` (usage hints), `U` (unicode placeholders), `P`, `Q`, `H`, `V`
-                // (relative placements) and `e` (feature queries) are not supported and are
-                // ignored, as is allowed by the protocol.
+                // Keys like `U` (unicode placeholders) and `P`, `Q`, `H`, `V` (relative placements)
+                // are not supported and are ignored, as is allowed by the protocol.
                 break;
         }
 
+        if (mError == null) recordSpecifiedKey(key, value);
+
         return mError == null;
+    }
+
+    /**
+     * Record a `key=value` pair of the command so that it can be reported back in a feature query
+     * response if the key is supported for the queried action.
+     *
+     * The `a`, `i`, `I`, `m`, `q` and `e` keys are never included in a feature query response.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#querying-support-for-protocol-features
+     */
+    private void recordSpecifiedKey(char key, @NonNull String value) {
+        switch (key) {
+            case 'a':
+            case 'i':
+            case 'I':
+            case 'm':
+            case 'q':
+            case 'e':
+                return;
+            default:
+                mSpecifiedKeys.put(key, value);
+        }
     }
 
     private boolean validateControlData() {
         // The `i` and `I` keys are mutually exclusive.
         if (mImageId > 0 && mImageNumber > 0) {
             return setError(RESPONSE_EINVAL, "Both the \"i\" and \"I\" keys cannot be specified");
+        }
+
+        // The `e` key is only allowed in query actions.
+        if (mFeatureQueryAction != 0 && mAction != ACTION_QUERY) {
+            return setError(RESPONSE_EINVAL, "The \"e\" key is only allowed for the query action");
         }
 
         switch (mAction) {

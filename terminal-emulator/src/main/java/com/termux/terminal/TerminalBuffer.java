@@ -716,10 +716,13 @@ public final class TerminalBuffer {
      * @param y The row of the top left cell of the image.
      * @param cellW The width in pixels of a cell.
      * @param cellH The height in pixels of a cell.
+     * @param pixelOffsetX The x-offset in pixels within the first cell at which to start drawing the image.
+     * @param pixelOffsetY The y-offset in pixels within the first cell at which to start drawing the image.
      * @return Returns the {@link TerminalBitmap} created and the cells it occupies, or {@code null}
      * if it could not be created.
      */
-    public synchronized TerminalBitmap addTerminalBitmapForKittyImage(Bitmap bitmap, int x, int y, int cellW, int cellH) {
+    public synchronized TerminalBitmap addTerminalBitmapForKittyImage(Bitmap bitmap, int x, int y, int cellW, int cellH,
+                                                                      int pixelOffsetX, int pixelOffsetY) {
         int bitmapNum = getFreeTerminalBitmapNum();
         if (bitmapNum < TERMINAL_BITMAP__NUM_START) {
             Logger.logError(mClient, LOG_TAG, "Cannot create more than " + TERMINAL_BITMAP__NUM_END + " bitmaps");
@@ -730,6 +733,7 @@ public final class TerminalBuffer {
         if (terminalBitmap == null || terminalBitmap.getBitmap() == null) {
             return null;
         }
+        terminalBitmap.setPixelOffsets(pixelOffsetX, pixelOffsetY);
         mTerminalBitmaps.put(bitmapNum, terminalBitmap);
 
         doTerminalBitmapsGC(30000);
