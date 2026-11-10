@@ -207,7 +207,10 @@ public final class TerminalView extends View {
                     mScroller.fling(0, mTopRow, 0, -(int) (velocityY * SCALE), 0, 0, -mEmulator.getScreen().getActiveTranscriptRows(), 0);
                 }
 
-                post(new Runnable() {
+                // Run on the next animation frame so that the scroll offset is only updated once per
+                // frame instead of spinning the message queue as fast as possible, since a render
+                // pass only draws the state of the last scroll anyway.
+                postOnAnimation(new Runnable() {
                     private int mLastY = 0;
 
                     @Override
@@ -222,7 +225,7 @@ public final class TerminalView extends View {
                         int diff = mouseTrackingAtStartOfFling ? (newY - mLastY) : (newY - mTopRow);
                         doScroll(e2, diff);
                         mLastY = newY;
-                        if (more) post(this);
+                        if (more) postOnAnimation(this);
                     }
                 });
 
@@ -575,6 +578,7 @@ public final class TerminalView extends View {
     void doScroll(MotionEvent event, int rowsDown) {
         boolean up = rowsDown < 0;
         int amount = Math.abs(rowsDown);
+        final int oldTopRow = mTopRow;
         for (int i = 0; i < amount; i++) {
             if (mEmulator.isMouseTrackingActive()) {
                 sendMouseEventCode(event, up ? TerminalEmulator.MOUSE_WHEELUP_BUTTON : TerminalEmulator.MOUSE_WHEELDOWN_BUTTON, true);
@@ -584,9 +588,12 @@ public final class TerminalView extends View {
                 handleKeyCode(up ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, 0);
             } else {
                 setTopRow(Math.min(0, Math.max(-(mEmulator.getScreen().getActiveTranscriptRows()), mTopRow + (up ? -1 : 1))));
-                if (!awakenScrollBars()) invalidate();
             }
         }
+
+        // Invalidate only once after all the rows have been scrolled, and only if the top row
+        // actually changed, instead of once for each row, since a render pass draws all the rows.
+        if (mTopRow != oldTopRow && !awakenScrollBars()) invalidate();
     }
 
     /** Overriding {@link View#onGenericMotionEvent(MotionEvent)}. */

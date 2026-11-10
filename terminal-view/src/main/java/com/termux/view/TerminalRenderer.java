@@ -9,6 +9,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.Build;
 
+import com.termux.terminal.TerminalBitmap;
 import com.termux.terminal.TerminalBuffer;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalRow;
@@ -36,6 +37,39 @@ public final class TerminalRenderer {
     final int mFontLineSpacingAndAscent;
 
     private final float[] asciiMeasures = new float[127];
+
+    /**
+     * The number of code points whose measured width is cached, see {@link #getMeasuredWidth}.
+     * Must be a power of two.
+     */
+    private static final int MEASURED_WIDTHS_CACHE_SIZE = 2048;
+    private static final int MEASURED_WIDTHS_CACHE_MASK = MEASURED_WIDTHS_CACHE_SIZE - 1;
+    /** The max number of slots to check for an entry in the {@link #mMeasuredWidthsCacheKeys} table. */
+    private static final int MEASURED_WIDTHS_CACHE_MAX_PROBES = 4;
+
+    /**
+     * Cache of the widths of the non-ASCII code points as measured by {@link Paint}, since measuring
+     * them for each cell on every render pass is very slow and their width cannot change for the
+     * lifetime of the renderer. The code point plus one is stored as the key so that `0` denotes an
+     * unused slot. The cache is only an optimization, so it never needs to be invalidated and an
+     * entry is simply overwritten if no free slot is found within the max number of probes.
+     */
+    private final int[] mMeasuredWidthsCacheKeys = new int[MEASURED_WIDTHS_CACHE_SIZE];
+    private final float[] mMeasuredWidthsCacheValues = new float[MEASURED_WIDTHS_CACHE_SIZE];
+
+    /** Reused rects to prevent allocations when rendering a {@link TerminalBitmap}. */
+    private final Rect mBitmapSrcRect = new Rect();
+    private final RectF mBitmapDestRect = new RectF();
+
+    /**
+     * The text effects and state as last set on {@link #mTextPaint} by {@link #drawTextRun}, so that
+     * the native paint is only updated for a run if the state has actually changed. The initial
+     * values are the defaults of a new {@link Paint}.
+     */
+    private boolean mLastPaintBold;
+    private boolean mLastPaintUnderline;
+    private boolean mLastPaintItalic;
+    private boolean mLastPaintStrikeThrough;
 
     public TerminalRenderer(int textSize, Typeface typeface) {
         mTextSize = textSize;
@@ -93,7 +127,8 @@ public final class TerminalRenderer {
             boolean lastRunInsideSelection = false;
             int lastRunStartColumn = -1;
             int lastRunStartIndex = 0;
-            boolean lastRunFontWidthMismatch = false;
+            // The width ratio of the last code point added to the current run, see `widthRatio` below.
+            float lastRunWidthRatio = 0.f;
             int currentCharIndex = 0;
             float measuredWidthForRun = 0.f;
 
@@ -104,22 +139,21 @@ public final class TerminalRenderer {
                 final int codePoint = charIsHighsurrogate ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
                 final long style = lineObject.getStyle(column);
                 if (TextStyle.isTerminalBitmap(style)) {
-                    Bitmap bitmap = mEmulator.getScreen().getSixelBitmap(style);
-                    if (bitmap != null) {
-                        float left = column * mFontWidth;
-                        float top = heightOffset - mFontLineSpacing;
-                        Rect bitmapSrcRect = mEmulator.getScreen().getSixelRect(style);
-                        RectF bitmapDestRect = new RectF(left, top, left + mFontWidth, top + mFontLineSpacing);
-                        canvas.drawBitmap(bitmap, bitmapSrcRect, bitmapDestRect, null);
-                    }
-                    column += 1;
+                    // Draw all the following cells of the bitmap row with a single drawBitmap() call
+                    // instead of one call for each cell, which can mean thousands of drawing calls
+                    // for a large image on each render pass. The cells of a row are always iterated
+                    // from the left, so the cell being iterated is the leftmost visible cell of the
+                    // remaining part of the row.
+                    final int cellsDrawn = renderBitmapRow(mEmulator, canvas, lineObject, style, column,
+                        heightOffset - mFontLineSpacing);
+                    column += cellsDrawn;
+                    currentCharIndex += cellsDrawn;
                     measuredWidthForRun = 0.f;
                     lastRunStyle = 0;
                     lastRunInsideCursor = false;
-                    lastRunStartColumn = column + 1;
+                    lastRunStartColumn = column;
                     lastRunStartIndex = currentCharIndex;
-                    lastRunFontWidthMismatch = false;
-                    currentCharIndex += charsForCodePoint;
+                    lastRunWidthRatio = 0.f;
                     continue;
                 }
                 final int codePointWcWidth = WcWidth.width(codePoint);
@@ -130,11 +164,16 @@ public final class TerminalRenderer {
                 // This could happen for some fonts which are not truly monospace, or for more exotic characters such as
                 // smileys which android font renders as wide.
                 // If this is detected, we draw this code point scaled to match what wcwidth() expects.
-                final float measuredCodePointWidth = (codePoint < asciiMeasures.length) ? asciiMeasures[codePoint] : mTextPaint.measureText(line,
-                    currentCharIndex, charsForCodePoint);
-                final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
+                final float measuredCodePointWidth = (codePoint < asciiMeasures.length) ? asciiMeasures[codePoint]
+                    : getMeasuredWidth(line, currentCharIndex, charsForCodePoint, codePoint);
+                // The ratio of the width that the font uses for this code point to the width expected
+                // by wcwidth(). If this is not `1`, then the code point is drawn scaled by
+                // `drawTextRun()` to match what wcwidth() expects.
+                final float widthRatio = (codePointWcWidth <= 0) ? 1.f
+                    : measuredCodePointWidth / (mFontWidth * codePointWcWidth);
 
-                if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideSelection != lastRunInsideSelection || fontWidthMismatch || lastRunFontWidthMismatch) {
+                if (style != lastRunStyle || insideCursor != lastRunInsideCursor || insideSelection != lastRunInsideSelection
+                    || Math.abs(widthRatio - lastRunWidthRatio) > 0.01) {
                     if (column == 0 || column == lastRunStartColumn) {
                         // Skip first column as there is nothing to draw, just record the current style.
                     } else {
@@ -155,7 +194,7 @@ public final class TerminalRenderer {
                     lastRunInsideSelection = insideSelection;
                     lastRunStartColumn = column;
                     lastRunStartIndex = currentCharIndex;
-                    lastRunFontWidthMismatch = fontWidthMismatch;
+                    lastRunWidthRatio = widthRatio;
                 }
                 measuredWidthForRun += measuredCodePointWidth;
                 column += codePointWcWidth;
@@ -249,11 +288,26 @@ public final class TerminalRenderer {
                 foreColor = 0xFF000000 + (red << 16) + (green << 8) + blue;
             }
 
-            mTextPaint.setFakeBoldText(bold);
-            mTextPaint.setUnderlineText(underline);
-            mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
-            mTextPaint.setStrikeThruText(strikeThrough);
             mTextPaint.setColor(foreColor);
+
+            // Only update the effects that have changed since the last run to prevent redundant
+            // calls to the native paint for each run.
+            if (bold != mLastPaintBold) {
+                mTextPaint.setFakeBoldText(bold);
+                mLastPaintBold = bold;
+            }
+            if (underline != mLastPaintUnderline) {
+                mTextPaint.setUnderlineText(underline);
+                mLastPaintUnderline = underline;
+            }
+            if (italic != mLastPaintItalic) {
+                mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
+                mLastPaintItalic = italic;
+            }
+            if (strikeThrough != mLastPaintStrikeThrough) {
+                mTextPaint.setStrikeThruText(strikeThrough);
+                mLastPaintStrikeThrough = strikeThrough;
+            }
 
             // The text alignment is the default Paint.Align.LEFT.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -264,6 +318,93 @@ public final class TerminalRenderer {
         }
 
         if (savedMatrix) canvas.restore();
+    }
+
+    /**
+     * Get the width of a code point as measured by {@link Paint}, caching the value so that
+     * {@link Paint#measureText(char[], int, int)} does not have to be called for every cell on every
+     * render pass, which is very slow for code points that are not in {@link #asciiMeasures}, like
+     * for CJK chars or emoji. The measured width cannot change for the lifetime of a renderer since
+     * a new one is created if the typeface or the text size is changed.
+     *
+     * @param text The {@link TerminalRow#mText} array containing the code point.
+     * @param charIndex The index of the code point in {@code text}.
+     * @param charsForCodePoint The number of java chars used by the code point, `1` or `2`.
+     * @param codePoint The code point to get the width for.
+     * @return The width of the code point as measured by {@link Paint}.
+     */
+    private float getMeasuredWidth(char[] text, int charIndex, int charsForCodePoint, int codePoint) {
+        final int cacheKey = codePoint + 1;
+        int cacheIndex = (codePoint ^ (codePoint >>> 11)) & MEASURED_WIDTHS_CACHE_MASK;
+        for (int i = 0; i < MEASURED_WIDTHS_CACHE_MAX_PROBES; i++, cacheIndex = (cacheIndex + 1) & MEASURED_WIDTHS_CACHE_MASK) {
+            final int cachedKey = mMeasuredWidthsCacheKeys[cacheIndex];
+            if (cachedKey == cacheKey) return mMeasuredWidthsCacheValues[cacheIndex];
+            if (cachedKey == 0) {
+                final float width = mTextPaint.measureText(text, charIndex, charsForCodePoint);
+                mMeasuredWidthsCacheKeys[cacheIndex] = cacheKey;
+                mMeasuredWidthsCacheValues[cacheIndex] = width;
+                return width;
+            }
+        }
+
+        // No free slot was found within the max number of probes, so measure the code point
+        // without caching it.
+        return mTextPaint.measureText(text, charIndex, charsForCodePoint);
+    }
+
+    /**
+     * Render the following cells of a {@link TerminalBitmap} row being iterated with a single call to
+     * {@link Canvas#drawBitmap(Bitmap, Rect, RectF, Paint)}, instead of drawing each cell of the row
+     * separately, which can mean thousands of drawing calls for a large image on each render pass.
+     *
+     * The cells of the row are drawn exactly as they would be if each of them was drawn separately,
+     * since the cell dimensions of the bitmap are used to calculate its source rect. Only the cells
+     * that still contain the same bitmap are drawn, so that any cells that were overwritten by text
+     * after the bitmap was created are still rendered as text.
+     *
+     * @param emulator The {@link TerminalEmulator} being rendered, used to get the terminal columns.
+     * @param canvas The {@link Canvas} to draw on.
+     * @param lineObject The {@link TerminalRow} being rendered.
+     * @param style The style of the cell being iterated, which is a {@link TextStyle#isTerminalBitmap}
+     *              style.
+     * @param column The column of the cell being iterated.
+     * @param rowTop The top y coordinate of the row being rendered.
+     * @return The number of cells that were rendered and that the caller should skip, at least `1`.
+     */
+    private int renderBitmapRow(TerminalEmulator emulator, Canvas canvas, TerminalRow lineObject, long style,
+                                int column, float rowTop) {
+        final TerminalBuffer screen = emulator.getScreen();
+        final TerminalBitmap terminalBitmap = screen.getTerminalBitmap(style);
+        final Bitmap bitmap = (terminalBitmap == null) ? null : terminalBitmap.getBitmap();
+        if (bitmap == null) return 1;
+
+        final int cellWidth = terminalBitmap.getCellWidth();
+        final int cellHeight = terminalBitmap.getCellHeight();
+        if (cellWidth < 1 || cellHeight < 1) return 1;
+
+        final int bitmapNum = TextStyle.getTerminalBitmapNum(style);
+        final int bitmapCellX = TextStyle.getTerminalBitmapX(style);
+        final int bitmapCellY = TextStyle.getTerminalBitmapY(style);
+
+        // Clamp to the cells of the bitmap and to the terminal columns, since the bitmap can be wider
+        // than the terminal if it was resized to a smaller number of columns after it was created.
+        final int bitmapColumns = (bitmap.getWidth() + cellWidth - 1) / cellWidth;
+        final int maxCells = Math.min(bitmapColumns - bitmapCellX, emulator.mColumns - column);
+        if (maxCells < 1) return 1;
+
+        int cellsWide = 1;
+        while (cellsWide < maxCells) {
+            final long cellStyle = lineObject.getStyle(column + cellsWide);
+            if (!TextStyle.isTerminalBitmap(cellStyle) || TextStyle.getTerminalBitmapNum(cellStyle) != bitmapNum) break;
+            cellsWide++;
+        }
+
+        final float left = column * mFontWidth;
+        mBitmapSrcRect.set(bitmapCellX * cellWidth, bitmapCellY * cellHeight,
+            (bitmapCellX + cellsWide) * cellWidth, (bitmapCellY + 1) * cellHeight);
+        mBitmapDestRect.set(left, rowTop, left + cellsWide * mFontWidth, rowTop + mFontLineSpacing);
+        canvas.drawBitmap(bitmap, mBitmapSrcRect, mBitmapDestRect, null);
+        return cellsWide;
     }
 
     public float getFontWidth() {
