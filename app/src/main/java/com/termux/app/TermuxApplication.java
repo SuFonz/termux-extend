@@ -16,6 +16,7 @@ import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment
 import com.termux.shared.termux.shell.am.TermuxAmSocketServer;
 import com.termux.shared.termux.shell.TermuxShellManager;
 import com.termux.shared.termux.theme.TermuxThemeUtils;
+import com.termux.terminal.TerminalEmulator;
 
 public class TermuxApplication extends Application {
 
@@ -39,6 +40,9 @@ public class TermuxApplication extends Application {
 
         // Init app wide SharedProperties loaded from termux.properties
         TermuxAppSharedProperties properties = TermuxAppSharedProperties.init(context);
+
+        // Set whether images using the kitty graphics protocol should be processed by the terminal
+        TerminalEmulator.setKittyGraphicsEnabled(properties.isKittyGraphicsEnabled());
 
         // Init app wide shell manager
         TermuxShellManager shellManager = TermuxShellManager.init(context);

@@ -2,18 +2,32 @@
 
 An unofficial, performance-focused build of the official [Termux](https://termux.dev) app, forked from [termux/termux-app](https://github.com/termux/termux-app) (`master` @ `8629e632`).
 
-The fork adds a single commit on top of upstream, `108f11d5` (*rendering optimization*). Terminal behaviour, escape sequences and settings are unchanged — it should just draw faster.
+The fork adds two commits on top of upstream: `108f11d5` (*rendering optimization*) and a **kitty graphics protocol** implementation. Everything else is upstream.
 
 > Not an official Termux release. Report fork-specific issues here, not upstream.
 
 ## What's new
 
-- **Row-batched image rendering** — images are drawn once per row instead of once per cell, which is a big win for sixel and iTerm2 inline images.
+**Rendering** (`108f11d5`)
+
+- **Row-batched images** — drawn once per row instead of once per cell, which is a big win for sixel and iTerm2 inline images.
 - **Glyph width cache** — widths of non-ASCII code points are cached instead of re-measured for every cell on every frame (CJK, emoji).
 - **Paint state diffing** — text effects are pushed to `Paint` only when they change.
 - **Frame-driven fling** — `post()` replaced with `postOnAnimation()`, so scrolling updates at most once per frame.
 - **Single invalidation per scroll** — one `invalidate()` per batch instead of one per row.
 - **Java 17** — `app`, `terminal-emulator` and `terminal-view` now target Java 17.
+
+**Kitty graphics protocol**
+
+- `APC ESC_G` images with actions `t`/`T`/`p`/`d`/`q`, PNG plus raw RGB/RGBA, chunked transfer (`m=1`), zlib (`o=z`) and file transfer (`t=f`/`t=t`).
+- Off by default. Enable it in `~/.termux/termux.properties`:
+
+  ```properties
+  kitty-graphics=true
+  ```
+
+  then run `termux-reload-settings`. Works with `kitten icat`, `chafa --format kitty`, `timg --kitty`.
+- Images use the same cell bitmap model as sixel, so they scroll with the text. Not implemented: animations, unicode placeholders, z-index stacking.
 
 ## Compatibility
 
@@ -25,7 +39,7 @@ The fork adds a single commit on top of upstream, `108f11d5` (*rendering optimiz
   tar -C /data/data/com.termux/files -cf ~/storage/shared/termux-backup.tar home usr
   ```
 
-- Plugins, `termux.properties`, the bootstrap and installed packages are unaffected.
+- Plugins, the bootstrap and installed packages are unaffected.
 
 ## Build
 

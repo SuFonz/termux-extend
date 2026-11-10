@@ -707,6 +707,63 @@ public final class TerminalBuffer {
     }
 
 
+    /**
+     * Add a {@link TerminalBitmap} for an image transmitted by the kitty graphics protocol, which
+     * is displayed at the cell position defined by the `x` and `y` arguments.
+     *
+     * @param bitmap The {@link Bitmap} to display, which should already be scaled to the required size.
+     * @param x The column of the top left cell of the image.
+     * @param y The row of the top left cell of the image.
+     * @param cellW The width in pixels of a cell.
+     * @param cellH The height in pixels of a cell.
+     * @return Returns the {@link TerminalBitmap} created and the cells it occupies, or {@code null}
+     * if it could not be created.
+     */
+    public synchronized TerminalBitmap addTerminalBitmapForKittyImage(Bitmap bitmap, int x, int y, int cellW, int cellH) {
+        int bitmapNum = getFreeTerminalBitmapNum();
+        if (bitmapNum < TERMINAL_BITMAP__NUM_START) {
+            Logger.logError(mClient, LOG_TAG, "Cannot create more than " + TERMINAL_BITMAP__NUM_END + " bitmaps");
+            return null;
+        }
+
+        TerminalBitmap terminalBitmap = TerminalBitmap.build(this, bitmapNum, bitmap, x, y, cellW, cellH);
+        if (terminalBitmap == null || terminalBitmap.getBitmap() == null) {
+            return null;
+        }
+        mTerminalBitmaps.put(bitmapNum, terminalBitmap);
+
+        doTerminalBitmapsGC(30000);
+        return terminalBitmap;
+    }
+
+    /**
+     * Remove a {@link TerminalBitmap} and clear the cells it occupies.
+     *
+     * This is used to delete a placement of an image transmitted by the kitty graphics protocol,
+     * since the image is rendered from the style of the cells it occupies, and just removing the
+     * {@link TerminalBitmap} from {@link #mTerminalBitmaps} would leave the cells as is.
+     *
+     * @param bitmapNum The bitmap number of the {@link TerminalBitmap} to remove.
+     */
+    public synchronized void removeTerminalBitmap(int bitmapNum) {
+        if (bitmapNum < TERMINAL_BITMAP__NUM_START) return;
+
+        mTerminalBitmaps.remove(bitmapNum);
+
+        for (TerminalRow line : mLines) {
+            if (line == null || !line.mHasTerminalBitmap) continue;
+
+            for (int column = 0; column < mColumns; column++) {
+                long style = line.getStyle(column);
+                if (TextStyle.isTerminalBitmap(style) && TextStyle.getTerminalBitmapNum(style) == bitmapNum) {
+                    line.setChar(column, ' ', TextStyle.NORMAL);
+                }
+            }
+        }
+    }
+
+
+
     /** Remove bitmaps that are completely scrolled out. */
     public synchronized void removeScrolledOutTerminalBitmaps(int row) {
         Set<Integer> bitmapsToRemove = new HashSet<>();

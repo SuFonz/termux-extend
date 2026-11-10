@@ -54,6 +54,7 @@ import com.termux.shared.termux.settings.properties.TermuxAppSharedProperties;
 import com.termux.shared.termux.theme.TermuxThemeUtils;
 import com.termux.shared.theme.NightMode;
 import com.termux.shared.view.ViewUtils;
+import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
 import com.termux.view.TerminalView;
@@ -444,6 +445,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
     private void reloadProperties() {
         mProperties.loadTermuxPropertiesFromDisk();
+
+        // Set whether images using the kitty graphics protocol should be processed by the terminal.
+        // This is done for all the existing terminal sessions so that the change takes effect
+        // when `termux-reload-settings` is run, without having to restart the sessions.
+        TerminalEmulator.setKittyGraphicsEnabled(mProperties.isKittyGraphicsEnabled());
 
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onReloadProperties();

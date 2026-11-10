@@ -1,10 +1,14 @@
 package com.termux.terminal;
 
+import android.graphics.Bitmap;
 import android.util.Base64;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Stack;
 
@@ -350,6 +354,99 @@ public final class TerminalEmulator {
 
     /** The {@link ITermImage} if an iTerm image command is being processed. */
     private ITermImage mITermImage;
+
+
+
+    /**
+     * If the kitty graphics protocol must be enabled to process image commands.
+     *
+     * The value can be set by the app based on a user preference like
+     * `TermuxPropertyConstants.KEY_KITTY_GRAPHICS` in `termux.properties`. It is a `static` variable
+     * so that the value can be updated for all the existing terminal sessions without having to
+     * recreate them, since the value is updated when `termux-reload-settings` is run.
+     */
+    private static boolean KITTY_GRAPHICS_ENABLED = false;
+
+    /** The {@link TerminalKittyGraphics} if a kitty graphics command is being processed. */
+    private TerminalKittyGraphics mKittyGraphics;
+
+    /**
+     * The map for image id to the {@link Bitmap} transmitted by the kitty graphics protocol.
+     *
+     * The map is defined as an {@link LinkedHashMap} with access order so that the image that was
+     * least recently used can be removed first when the max storage quota is reached.
+     */
+    private final LinkedHashMap<Integer, Bitmap> mKittyImages =
+        new LinkedHashMap<>(16, 0.75f, /* accessOrder */ true);
+
+    /** The total size of the {@link Bitmap} images in {@link #mKittyImages}. */
+    private long mKittyImagesSize = 0;
+
+    /** The placements of the images transmitted by the kitty graphics protocol on the screen. */
+    private final ArrayList<KittyPlacement> mKittyPlacements = new ArrayList<>();
+
+    /** The max number of images that can be stored for the kitty graphics protocol. */
+    private static final int KITTY_IMAGES_MAX_COUNT = 32;
+
+    /** The max total size of the images that can be stored for the kitty graphics protocol. */
+    private static final long KITTY_IMAGES_MAX_SIZE = 64 * 1024 * 1024;
+
+
+    /**
+     * Set whether the kitty graphics protocol must be enabled to process image commands.
+     */
+    public static void setKittyGraphicsEnabled(boolean enabled) {
+        KITTY_GRAPHICS_ENABLED = enabled;
+    }
+
+    public static boolean isKittyGraphicsEnabled() {
+        return KITTY_GRAPHICS_ENABLED;
+    }
+
+
+
+    /**
+     * A placement of an image transmitted by the kitty graphics protocol on a {@link TerminalBuffer}.
+     *
+     * The image is rendered from the style of the cells it occupies, so the placement is only
+     * required to be able to delete the cells of the image from the buffer.
+     */
+    private static class KittyPlacement {
+
+        /** The image id of the placement. */
+        final int mImageId;
+        /** The placement id of the placement. */
+        final int mPlacementId;
+        /** The {@link TerminalBuffer} that the placement was made on. */
+        final TerminalBuffer mBuffer;
+        /** The bitmap number of the {@link TerminalBitmap} that renders the placement. */
+        final int mBitmapNum;
+        /** The z-index of the placement. Not supported for rendering, only used for deletion. */
+        final int mZIndex;
+        /** The 1-based column of the top left cell of the placement when it was created. */
+        final int mColumn;
+        /** The 1-based row of the top left cell of the placement when it was created. */
+        final int mRow;
+        /** The number of columns the placement spans. */
+        final int mColumns;
+        /** The number of rows the placement spans. */
+        final int mRows;
+
+        KittyPlacement(int imageId, int placementId, TerminalBuffer buffer, int bitmapNum, int zIndex,
+                       int column, int row, int columns, int rows) {
+            mImageId = imageId;
+            mPlacementId = placementId;
+            mBuffer = buffer;
+            mBitmapNum = bitmapNum;
+            mZIndex = zIndex;
+            mColumn = column;
+            mRow = row;
+            mColumns = columns;
+            mRows = rows;
+        }
+
+    }
+
 
 
 
@@ -1873,6 +1970,8 @@ public final class TerminalEmulator {
                     // Clear new screen if alt buffer:
                     if (newScreen == mAltBuffer)
                         newScreen.blockSet(0, 0, mColumns, mRows, ' ', getStyle());
+                    // All images in the alt buffer must be cleared when switching to it, just as all text is cleared.
+                    clearKittyGraphicsPlacements(mAltBuffer);
                 }
                 break;
             }
@@ -2201,6 +2300,9 @@ public final class TerminalEmulator {
                     case 2: // Erase all of the display - all lines are erased, changed to single-width, and the cursor does not
                         // move..
                         blockClear(0, 0, mColumns, mRows);
+                        // The clear screen escape code should also clear all images, since the
+                        // images are rendered from the cells of the display.
+                        clearKittyGraphicsPlacements(mScreen);
                         break;
                     case 3: // Delete all lines saved in the scrollback buffer (xterm etc)
                         mMainBuffer.clearTranscript();
@@ -2607,8 +2709,8 @@ public final class TerminalEmulator {
     private void receiveApcEsc(final int b) {
         switch (b) {
             case '\\':
-                //doApc();
-                //clearApcTypeVariables();
+                doApc();
+                clearApcTypeVariables();
                 break;
             default:
                 // The ESC character was not followed by a \, so insert the ESC and
@@ -2623,12 +2725,532 @@ public final class TerminalEmulator {
     /**
      * Clear {@link #ESC_APC} type variables.
      */
-    public void clearApcTypeVariables() {}
+    public void clearApcTypeVariables() {
+        clearTerminalControlArgs();
+    }
 
     /**
      * Do {@link #ESC_APC}. Check its docs for more info.
+     *
+     * This handles Application Program Commands, like the kitty graphics protocol image commands.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/
      */
-    private void doApc() {}
+    private void doApc() {
+        // The kitty graphics protocol must be explicitly enabled in `termux.properties`, otherwise
+        // the APC commands are ignored as before.
+        if (!KITTY_GRAPHICS_ENABLED) return;
+
+        if (mTerminalControlArgs.length() < 1 ||
+            mTerminalControlArgs.charAt(0) != TerminalKittyGraphics.APC_IDENTIFIER) {
+            return;
+        }
+
+        processKittyGraphics();
+    }
+
+
+
+    /**
+     * Process a kitty graphics protocol command, and perform its action once all its image data
+     * chunks have been received.
+     */
+    private void processKittyGraphics() {
+        String apcCommand = mTerminalControlArgs.toString();
+
+        // A new command received while image data chunks of a previous command are still being
+        // received means that the previous upload must be aborted.
+        if (mKittyGraphics != null && mKittyGraphics.isReadingChunks() &&
+            !TerminalKittyGraphics.isChunkContinuation(apcCommand)) {
+            Logger.logWarn(mClient, LOG_TAG, "Aborting incomplete kitty graphics image data upload");
+            mKittyGraphics = null;
+        }
+
+        if (mKittyGraphics == null)
+            mKittyGraphics = new TerminalKittyGraphics(mClient);
+
+        if (!mKittyGraphics.readCommand(apcCommand)) {
+            sendKittyGraphicsResponse(mKittyGraphics, mKittyGraphics.getError());
+            mKittyGraphics = null;
+            return;
+        }
+
+        // The command is not complete yet, wait for the remaining image data chunks.
+        if (mKittyGraphics.isReadingChunks()) return;
+
+        TerminalKittyGraphics graphics = mKittyGraphics;
+        mKittyGraphics = null;
+
+        switch (graphics.getAction()) {
+            case TerminalKittyGraphics.ACTION_TRANSMIT:
+                processKittyGraphicsTransmit(graphics, /* display */ false);
+                break;
+            case TerminalKittyGraphics.ACTION_TRANSMIT_AND_DISPLAY:
+                processKittyGraphicsTransmit(graphics, /* display */ true);
+                break;
+            case TerminalKittyGraphics.ACTION_DISPLAY:
+                processKittyGraphicsDisplay(graphics);
+                break;
+            case TerminalKittyGraphics.ACTION_DELETE:
+                processKittyGraphicsDelete(graphics);
+                break;
+            case TerminalKittyGraphics.ACTION_QUERY:
+                processKittyGraphicsQuery(graphics);
+                break;
+            default:
+                sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL + ":Unsupported action");
+                break;
+        }
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_TRANSMIT} and
+     * {@link TerminalKittyGraphics#ACTION_TRANSMIT_AND_DISPLAY} actions.
+     */
+    private void processKittyGraphicsTransmit(TerminalKittyGraphics graphics, boolean shouldDisplay) {
+        if (!graphics.decodeImage()) {
+            sendKittyGraphicsResponse(graphics, graphics.getError());
+            return;
+        }
+
+        Bitmap bitmap = graphics.getBitmap();
+        int imageId = graphics.getImageId();
+
+        if (imageId > 0) {
+            // The existing image and all its placements must be deleted when image data is
+            // re-transmitted for an id.
+            deleteKittyImage(imageId, /* deletePlacements */ true);
+
+            if (!putKittyImage(imageId, bitmap)) {
+                sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOSPC + ":Failed to store the image");
+                return;
+            }
+        }
+
+        if (shouldDisplay && !displayKittyImage(graphics, bitmap)) return;
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_DISPLAY} action.
+     */
+    private void processKittyGraphicsDisplay(TerminalKittyGraphics graphics) {
+        int imageId = graphics.getImageId();
+        Bitmap bitmap = imageId > 0 ? mKittyImages.get(imageId) : null;
+
+        if (bitmap == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOENT +
+                ":No image with the id " + imageId + " found");
+            return;
+        }
+
+        if (!displayKittyImage(graphics, bitmap)) return;
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_QUERY} action. Only the support for the
+     * image formats and transmission mediums are queried, feature queries are not supported and
+     * are replied to without the `e` key as is allowed by the protocol.
+     */
+    private void processKittyGraphicsQuery(TerminalKittyGraphics graphics) {
+        char medium = graphics.getMedium();
+        if (medium != TerminalKittyGraphics.MEDIUM_DIRECT &&
+            medium != TerminalKittyGraphics.MEDIUM_FILE &&
+            medium != TerminalKittyGraphics.MEDIUM_TEMP_FILE) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL +
+                ":Unsupported transmission medium \"" + medium + "\"");
+            return;
+        }
+
+        int format = graphics.getFormat();
+        if (format != TerminalKittyGraphics.FORMAT_RGB &&
+            format != TerminalKittyGraphics.FORMAT_RGBA &&
+            format != TerminalKittyGraphics.FORMAT_PNG) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL +
+                ":Unsupported image format " + format);
+            return;
+        }
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Display an image at the current cursor position, and move the cursor past it as defined by
+     * the protocol, unless the cursor movement policy disables it.
+     *
+     * @return Returns {@code true} if the image was displayed, otherwise {@code false} and the
+     * error response is sent to the application.
+     */
+    private boolean displayKittyImage(TerminalKittyGraphics graphics, Bitmap image) {
+        Bitmap bitmap = getKittyImageSourceBitmap(graphics, image);
+        if (bitmap == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL +
+                ":The source rectangle of the image is not valid");
+            return false;
+        }
+
+        bitmap = scaleKittyImage(graphics, bitmap);
+        if (bitmap == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOSPC +
+                ":Failed to scale the image");
+            return false;
+        }
+
+        int column = mCursorCol;
+        int row = mCursorRow;
+
+        TerminalBitmap terminalBitmap = mScreen.addTerminalBitmapForKittyImage(
+            bitmap, column, row, mCellWidthPixels, mCellHeightPixels);
+        if (terminalBitmap == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOSPC +
+                ":Failed to create the image bitmap, the image may be too large");
+            return false;
+        }
+
+        int placedColumns = Math.max(1, (terminalBitmap.getBitmap().getWidth() + mCellWidthPixels - 1) / mCellWidthPixels);
+        int placedRows = Math.max(1, (terminalBitmap.getBitmap().getHeight() + mCellHeightPixels - 1) / mCellHeightPixels);
+
+        mKittyPlacements.add(new KittyPlacement(graphics.getImageId(), graphics.getPlacementId(),
+            mScreen, terminalBitmap.getBitmapNum(), graphics.getZIndex(),
+            column + 1, row + 1, placedColumns, placedRows));
+
+        if (!graphics.isCursorMovementDisabled())
+            moveCursorAfterKittyImage(placedColumns, terminalBitmap.getScrollLines());
+
+        return true;
+    }
+
+    /**
+     * Get the part of the image defined by the source rectangle as defined by the `x`, `y`, `w`
+     * and `h` keys, or the full image if no source rectangle is defined.
+     */
+    private Bitmap getKittyImageSourceBitmap(TerminalKittyGraphics graphics, Bitmap image) {
+        int x = Math.max(0, graphics.getX());
+        int y = Math.max(0, graphics.getY());
+        int width = graphics.getW();
+        int height = graphics.getH();
+
+        if (width < 1) width = image.getWidth() - x;
+        if (height < 1) height = image.getHeight() - y;
+
+        width = Math.min(width, image.getWidth() - x);
+        height = Math.min(height, image.getHeight() - y);
+
+        if (x == 0 && y == 0 && width == image.getWidth() && height == image.getHeight())
+            return image;
+
+        if (width < 1 || height < 1) return null;
+
+        try {
+            return Bitmap.createBitmap(image, x, y, width, height);
+        } catch (Throwable t) {
+            if (t instanceof OutOfMemoryError) System.gc();
+            Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Failed to crop the image", t);
+            return null;
+        }
+    }
+
+    /**
+     * Scale the image to the area defined by the `c` and `r` keys, and align it to the cell grid so
+     * that the cells it occupies are fully drawn, since the image is rendered from the cells.
+     */
+    private Bitmap scaleKittyImage(TerminalKittyGraphics graphics, Bitmap image) {
+        int columns = graphics.getColumns();
+        int rows = graphics.getRows();
+
+        int maxColumns = Math.max(1, mColumns - mCursorCol);
+        int maxWidth = maxColumns * mCellWidthPixels;
+
+        int imageWidth = image.getWidth();
+        int imageHeight = image.getHeight();
+
+        int width;
+        int height;
+        if (columns > 0 && rows > 0) {
+            // The image is scaled to fit the area defined.
+            width = columns * mCellWidthPixels;
+            height = rows * mCellHeightPixels;
+        } else if (columns > 0) {
+            // The height is computed based on the aspect ratio of the image.
+            width = columns * mCellWidthPixels;
+            height = Math.max(1, (int) ((long) imageHeight * width / imageWidth));
+        } else if (rows > 0) {
+            // The width is computed based on the aspect ratio of the image.
+            height = rows * mCellHeightPixels;
+            width = Math.max(1, (int) ((long) imageWidth * height / imageHeight));
+        } else {
+            width = imageWidth;
+            height = imageHeight;
+        }
+
+        // The image must not extend beyond the right margin of the screen. Images that do not
+        // define the area to display over are scaled down without distortion.
+        if (width > maxWidth) {
+            if (columns <= 0 && rows <= 0) {
+                height = Math.max(1, (int) ((long) imageHeight * maxWidth / imageWidth));
+            }
+            width = maxWidth;
+        }
+
+        // Align the image to the cell grid, so that the cells it occupies are fully drawn,
+        // otherwise the image is cropped to the cells it occupies.
+        int alignedWidth = Math.min(((width + mCellWidthPixels - 1) / mCellWidthPixels) * mCellWidthPixels, maxWidth);
+        int alignedHeight = ((height + mCellHeightPixels - 1) / mCellHeightPixels) * mCellHeightPixels;
+
+        if (alignedWidth < 1) alignedWidth = mCellWidthPixels;
+        if (alignedHeight < 1) alignedHeight = mCellHeightPixels;
+
+        if (alignedWidth == imageWidth && alignedHeight == imageHeight) return image;
+
+        try {
+            return Bitmap.createScaledBitmap(image, alignedWidth, alignedHeight, true);
+        } catch (Throwable t) {
+            if (t instanceof OutOfMemoryError) System.gc();
+            Logger.logStackTraceWithMessage(mClient, LOG_TAG, "Failed to scale the image", t);
+            return null;
+        }
+    }
+
+    /**
+     * Move the cursor to the right by the number of columns and down by the number of rows of the
+     * image placement, as defined by the protocol, so that the cursor is placed at the cell after
+     * the image.
+     *
+     * The cursor is not moved past the last row of the screen, since scrolling the screen to move
+     * the cursor past it would scroll the image out of the visible area.
+     *
+     * @param columns The number of columns the image placement spans.
+     * @param rows The number of rows of the screen that the cursor should be moved down by, which
+     *             is {@link TerminalBitmap#getScrollLines()} since the image would have been
+     *             scrolled up along with the text if the screen was scrolled when it was placed.
+     */
+    private void moveCursorAfterKittyImage(int columns, int rows) {
+        int linefeeds = Math.min(rows, mRows - 1 - mCursorRow);
+        for (int i = 0; i < linefeeds; i++) doLinefeed();
+
+        int col = Math.min(mCursorCol + columns, mColumns - 1);
+        setCursorCol(col);
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_DELETE} action.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#deleting-images
+     */
+    private void processKittyGraphicsDelete(TerminalKittyGraphics graphics) {
+        char specifier = graphics.getDeleteSpecifier();
+        // The lowercase variants only delete the placements, while the uppercase variants also
+        // free the image data, provided the image is not referenced elsewhere.
+        boolean shouldFreeImageData = Character.isUpperCase(specifier);
+        char delete = Character.toLowerCase(specifier);
+
+        int imageId = graphics.getImageId();
+        int placementId = graphics.getPlacementId();
+
+        switch (delete) {
+            case TerminalKittyGraphics.DELETE_ALL:
+                deleteKittyPlacements(null, 0, null, null, null, null, null);
+                if (shouldFreeImageData) clearKittyImages();
+                break;
+            case TerminalKittyGraphics.DELETE_BY_IMAGE_ID:
+                deleteKittyPlacements(imageId, placementId, null, null, null, null, null);
+                if (shouldFreeImageData) deleteKittyImage(imageId, /* deletePlacements */ false);
+                break;
+            case TerminalKittyGraphics.DELETE_INTERSECTING_CURSOR:
+                deleteKittyPlacements(null, 0, mCursorCol + 1, mCursorRow + 1, null, null, null);
+                break;
+            case TerminalKittyGraphics.DELETE_INTERSECTING_CELL:
+                deleteKittyPlacements(null, 0, graphics.getX(), graphics.getY(), null, null, null);
+                break;
+            case TerminalKittyGraphics.DELETE_INTERSECTING_CELL_WITH_Z_INDEX:
+                deleteKittyPlacements(null, 0, graphics.getX(), graphics.getY(), graphics.getZIndex(), null, null);
+                break;
+            case TerminalKittyGraphics.DELETE_INTERSECTING_COLUMN:
+                deleteKittyPlacements(null, 0, null, null, null, graphics.getX(), null);
+                break;
+            case TerminalKittyGraphics.DELETE_INTERSECTING_ROW:
+                deleteKittyPlacements(null, 0, null, null, null, null, graphics.getY());
+                break;
+            case TerminalKittyGraphics.DELETE_WITH_Z_INDEX:
+                deleteKittyPlacements(null, 0, null, null, graphics.getZIndex(), null, null);
+                break;
+            default:
+                sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL +
+                    ":Unsupported delete specifier \"" + specifier + "\"");
+                return;
+        }
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Delete the kitty graphics protocol image placements that match the arguments passed.
+     *
+     * Note that the positions of the placements are the ones that were defined when the placements
+     * were created, and are not updated if the screen is scrolled afterwards, since the cells of
+     * the placements are scrolled along with the text.
+     *
+     * @param imageId The image id to match, or {@code null} to not match by image id.
+     * @param placementId The placement id to match, or {@code 0} to not match by placement id.
+     * @param cellColumn The 1-based column of the cell to match, or {@code null} to not match by cell.
+     * @param cellRow The 1-based row of the cell to match, or {@code null} to not match by cell.
+     * @param zIndex The z-index to match, or {@code null} to not match by z-index.
+     * @param column The 1-based column to match, or {@code null} to not match by column.
+     * @param row The 1-based row to match, or {@code null} to not match by row.
+     */
+    private void deleteKittyPlacements(Integer imageId, int placementId, Integer cellColumn, Integer cellRow,
+                                       Integer zIndex, Integer column, Integer row) {
+        for (int i = mKittyPlacements.size() - 1; i >= 0; i--) {
+            KittyPlacement placement = mKittyPlacements.get(i);
+
+            if (imageId != null && placement.mImageId != imageId) continue;
+            if (placementId > 0 && placement.mPlacementId != placementId) continue;
+            if (zIndex != null && placement.mZIndex != zIndex) continue;
+
+            if (cellColumn != null && cellRow != null &&
+                !isCellWithinPlacement(placement, cellColumn, cellRow)) continue;
+
+            if (column != null &&
+                (column < placement.mColumn || column >= placement.mColumn + placement.mColumns)) continue;
+
+            if (row != null &&
+                (row < placement.mRow || row >= placement.mRow + placement.mRows)) continue;
+
+            placement.mBuffer.removeTerminalBitmap(placement.mBitmapNum);
+            mKittyPlacements.remove(i);
+        }
+    }
+
+    /** Check if the 1-based cell coordinates are within the cells occupied by a placement. */
+    private boolean isCellWithinPlacement(KittyPlacement placement, int column, int row) {
+        return column >= placement.mColumn && column < placement.mColumn + placement.mColumns &&
+            row >= placement.mRow && row < placement.mRow + placement.mRows;
+    }
+
+    /**
+     * Store the image data of an image transmitted for an id, evicting older images if the storage
+     * quota is reached.
+     *
+     * @return Returns {@code true} if the image was stored, otherwise {@code false}.
+     */
+    private boolean putKittyImage(int imageId, Bitmap bitmap) {
+        long imageSize = bitmap.getByteCount();
+
+        if (imageSize > KITTY_IMAGES_MAX_SIZE) {
+            Logger.logError(mClient, LOG_TAG, "The kitty graphics image with id " + imageId + " and size " +
+                imageSize + " is greater than the max size " + KITTY_IMAGES_MAX_SIZE);
+            return false;
+        }
+
+        while (!mKittyImages.isEmpty() &&
+            (mKittyImages.size() + 1 > KITTY_IMAGES_MAX_COUNT || mKittyImagesSize + imageSize > KITTY_IMAGES_MAX_SIZE)) {
+            // Evict the images that are not placed on the screen first, otherwise the least recently used one.
+            Integer imageIdToRemove = getKittyImageIdToEvict();
+            if (imageIdToRemove == null) break;
+            deleteKittyImage(imageIdToRemove, /* deletePlacements */ true);
+        }
+
+        Bitmap previousBitmap = mKittyImages.put(imageId, bitmap);
+        if (previousBitmap != null) mKittyImagesSize -= previousBitmap.getByteCount();
+        mKittyImagesSize += imageSize;
+
+        return true;
+    }
+
+    /**
+     * Get the id of the image that should be evicted when the storage quota is reached, which is an
+     * image that is not placed on the screen, or the least recently used one.
+     */
+    private Integer getKittyImageIdToEvict() {
+        for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
+            if (!isKittyImagePlaced(entry.getKey())) return entry.getKey();
+        }
+
+        for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
+            return entry.getKey();
+        }
+
+        return null;
+    }
+
+    private boolean isKittyImagePlaced(int imageId) {
+        for (KittyPlacement placement : mKittyPlacements) {
+            if (placement.mImageId == imageId) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Delete an image transmitted for an id, optionally deleting its placements as well.
+     */
+    private void deleteKittyImage(int imageId, boolean deletePlacements) {
+        if (imageId <= 0) return;
+
+        if (deletePlacements) deleteKittyPlacements(imageId, 0, null, null, null, null, null);
+
+        Bitmap bitmap = mKittyImages.remove(imageId);
+        if (bitmap != null) mKittyImagesSize -= bitmap.getByteCount();
+    }
+
+    /** Clear all the images transmitted by the kitty graphics protocol and their placements. */
+    private void clearKittyGraphics() {
+        clearKittyGraphicsPlacements(null);
+        clearKittyImages();
+        mKittyGraphics = null;
+    }
+
+    /**
+     * Delete all the kitty graphics protocol image placements from the {@link TerminalBuffer} passed.
+     *
+     * @param buffer The {@link TerminalBuffer} to delete the placements from, or {@code null} to
+     *               delete the placements from all buffers.
+     */
+    private void clearKittyGraphicsPlacements(TerminalBuffer buffer) {
+        for (int i = mKittyPlacements.size() - 1; i >= 0; i--) {
+            KittyPlacement placement = mKittyPlacements.get(i);
+            if (buffer != null && placement.mBuffer != buffer) continue;
+
+            placement.mBuffer.removeTerminalBitmap(placement.mBitmapNum);
+            mKittyPlacements.remove(i);
+        }
+    }
+
+    /** Clear all the images transmitted by the kitty graphics protocol. */
+    private void clearKittyImages() {
+        mKittyImages.clear();
+        mKittyImagesSize = 0;
+    }
+
+    /**
+     * Send a response to the application for a kitty graphics protocol command, unless the
+     * responses have been suppressed with the `q` key.
+     */
+    private void sendKittyGraphicsResponse(TerminalKittyGraphics graphics, String response) {
+        if (response == null) response = TerminalKittyGraphics.RESPONSE_OK;
+
+        boolean isOk = response.startsWith(TerminalKittyGraphics.RESPONSE_OK);
+        if (isOk && graphics.shouldSuppressOkResponse()) return;
+        if (!isOk && graphics.shouldSuppressErrorResponse()) return;
+
+        StringBuilder command = new StringBuilder("\033_G");
+        if (graphics.getImageId() > 0) {
+            command.append("i=").append(graphics.getImageId());
+            if (graphics.getPlacementId() > 0) command.append(",p=").append(graphics.getPlacementId());
+        } else if (graphics.getImageNumber() > 0) {
+            command.append("I=").append(graphics.getImageNumber());
+        }
+        if (command.length() > 3) command.append(";").append(response);
+        else command.setLength(0);
+
+        if (command.length() < 1) return;
+
+        command.append("\033\\");
+        mSession.write(command.toString());
+    }
+
 
 
 
@@ -3517,6 +4139,9 @@ public final class TerminalEmulator {
         clearTerminalControlArgs();
         clearOscTypeVariables();
         mITermImage = null;
+
+        // All images visible on the screen must be cleared when the terminal is reset.
+        clearKittyGraphics();
     }
 
     public String getSelectedText(int x1, int y1, int x2, int y2) {
