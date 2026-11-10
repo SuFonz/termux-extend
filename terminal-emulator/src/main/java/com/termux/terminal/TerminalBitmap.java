@@ -410,6 +410,17 @@ public class TerminalBitmap {
         return mBitmap;
     }
 
+    /**
+     * Replace the {@link Bitmap} of the terminal bitmap, which is used to display the next frame of
+     * an animation transmitted by the kitty graphics protocol.
+     *
+     * The new bitmap must have the same dimensions as the current one, since the cells occupied by
+     * the bitmap and the size of the cells it is rendered with do not change.
+     */
+    public void setBitmap(Bitmap bitmap) {
+        mBitmap = bitmap;
+    }
+
 
     public int getCellWidth() {
         return mCellWidth;

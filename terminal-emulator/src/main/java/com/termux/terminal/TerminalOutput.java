@@ -29,4 +29,11 @@ public abstract class TerminalOutput {
 
     public abstract void onColorsChanged();
 
+    /**
+     * Notify the terminal client that the contents of the screen have changed without any input
+     * being received, like when an animation frame of an image is displayed, and that the terminal
+     * view should be redrawn.
+     */
+    public abstract void onScreenUpdate();
+
 }

@@ -20,7 +20,7 @@ The fork adds two commits on top of upstream: `108f11d5` (*rendering optimizatio
 **Kitty graphics protocol**
 
 - `APC ESC_G` images with actions `t`/`T`/`p`/`d`/`q`, PNG plus raw RGB/RGBA, chunked transfer (`m=1`), zlib (`o=z`) and file transfer (`t=f`/`t=t`).
-- Image numbers (`I=`), feature queries (`e=`), pixel offsets (`X`/`Y`), placement ids (`p=`) and usage hints (`N=`) are supported, as are all the delete specifiers.
+- Image numbers (`I=`), feature queries (`e=`), pixel offsets (`X`/`Y`), placement ids (`p=`) and usage hints (`N=`) are supported, as are all the delete specifiers and animations (`a=f` frames, `a=a` playback, `a=c` composition).
 - Off by default. Enable it in `~/.termux/termux.properties`:
 
   ```properties
@@ -28,7 +28,7 @@ The fork adds two commits on top of upstream: `108f11d5` (*rendering optimizatio
   ```
 
   then run `termux-reload-settings`. Works with `kitten icat`, `chafa --format kitty`, `timg --kitty`.
-- Images use the same cell bitmap model as sixel, so they scroll with the text. Not implemented: animations, unicode placeholders, z-index stacking.
+- Images use the same cell bitmap model as sixel, so they scroll with the text. Not implemented: unicode placeholders and z-index stacking.
 
 ## Compatibility
 

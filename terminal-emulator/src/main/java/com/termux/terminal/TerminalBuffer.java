@@ -575,6 +575,11 @@ public final class TerminalBuffer {
         return bitmapNum >= TERMINAL_BITMAP__NUM_START ? mTerminalBitmaps.get(bitmapNum): null;
     }
 
+    /** Get the {@link TerminalBitmap} for a bitmap number, or `null` if it is not loaded. */
+    public synchronized TerminalBitmap getTerminalBitmapByNum(int bitmapNum) {
+        return bitmapNum >= TERMINAL_BITMAP__NUM_START ? mTerminalBitmaps.get(bitmapNum) : null;
+    }
+
     public synchronized void clearTerminalBitmaps() {
         mTerminalBitmaps.clear();
     }

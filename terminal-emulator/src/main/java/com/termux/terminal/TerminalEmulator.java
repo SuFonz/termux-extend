@@ -1,6 +1,9 @@
 package com.termux.terminal;
 
 import android.graphics.Bitmap;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Base64;
 
 import java.nio.charset.StandardCharsets;
@@ -374,12 +377,13 @@ public final class TerminalEmulator {
     private TerminalKittyGraphics mKittyGraphics;
 
     /**
-     * The map for image id to the {@link Bitmap} transmitted by the kitty graphics protocol.
+     * The map for image id to the {@link TerminalKittyImage} transmitted by the kitty graphics
+     * protocol, which may contain multiple frames for an animation.
      *
      * The map is defined as an {@link LinkedHashMap} with access order so that the image that was
      * least recently used can be removed first when the max storage quota is reached.
      */
-    private final LinkedHashMap<Integer, Bitmap> mKittyImages =
+    private final LinkedHashMap<Integer, TerminalKittyImage> mKittyImages =
         new LinkedHashMap<>(16, 0.75f, /* accessOrder */ true);
 
     /** The total size of the {@link Bitmap} images in {@link #mKittyImages}. */
@@ -407,6 +411,17 @@ public final class TerminalEmulator {
 
     /** The placements of the images transmitted by the kitty graphics protocol on the screen. */
     private final ArrayList<KittyPlacement> mKittyPlacements = new ArrayList<>();
+
+    /** The handler used to schedule the frames of the kitty graphics protocol image animations. */
+    private Handler mKittyAnimationHandler;
+
+    /** The runnable that displays the next frames of the kitty graphics protocol image animations. */
+    private final Runnable mKittyAnimationRunnable = new Runnable() {
+        @Override
+        public void run() {
+            updateKittyAnimations();
+        }
+    };
 
     /** The max number of images that can be stored for the kitty graphics protocol. */
     private static final int KITTY_IMAGES_MAX_COUNT = 32;
@@ -2820,6 +2835,15 @@ public final class TerminalEmulator {
             case TerminalKittyGraphics.ACTION_QUERY:
                 processKittyGraphicsQuery(graphics);
                 break;
+            case TerminalKittyGraphics.ACTION_FRAME_TRANSMIT:
+                processKittyGraphicsFrameTransmit(graphics);
+                break;
+            case TerminalKittyGraphics.ACTION_ANIMATION_CONTROL:
+                processKittyGraphicsAnimationControl(graphics);
+                break;
+            case TerminalKittyGraphics.ACTION_FRAME_COMPOSE:
+                processKittyGraphicsFrameCompose(graphics);
+                break;
             default:
                 sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL + ":Unsupported action");
                 break;
@@ -2867,13 +2891,15 @@ public final class TerminalEmulator {
      */
     private void processKittyGraphicsDisplay(TerminalKittyGraphics graphics) {
         int imageId = getKittyGraphicsImageId(graphics);
-        Bitmap bitmap = imageId > 0 ? mKittyImages.get(imageId) : null;
+        TerminalKittyImage image = imageId > 0 ? mKittyImages.get(imageId) : null;
 
-        if (bitmap == null) {
+        if (image == null) {
             sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOENT +
                 ":No image with the id " + imageId + " found");
             return;
         }
+
+        Bitmap bitmap = image.getBitmap();
 
         // A placement with the same image id and placement id replaces the existing one, which
         // allows a placement to be resized or moved without flicker.
@@ -2975,11 +3001,16 @@ public final class TerminalEmulator {
             case TerminalKittyGraphics.ACTION_DISPLAY:
                 return "ftsvSOopcrCxywhXYN";
             case TerminalKittyGraphics.ACTION_DELETE:
-                return "dpxyz";
+                return "dpxyzfr";
             case TerminalKittyGraphics.ACTION_QUERY:
                 return "e";
+            case TerminalKittyGraphics.ACTION_FRAME_TRANSMIT:
+                return "ftsvSOocrzxyXYN";
+            case TerminalKittyGraphics.ACTION_ANIMATION_CONTROL:
+                return "srzcv";
+            case TerminalKittyGraphics.ACTION_FRAME_COMPOSE:
+                return "rcxywhXYC";
             default:
-                // Animation (`f`, `a`, `c`) is not supported.
                 return "";
         }
     }
@@ -3000,6 +3031,225 @@ public final class TerminalEmulator {
                 return "";
             default:
                 return "0";
+        }
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_FRAME_TRANSMIT} action, which adds a new frame
+     * to an animation or edits an existing one.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#transferring-animation-frame-data
+     */
+    private void processKittyGraphicsFrameTransmit(TerminalKittyGraphics graphics) {
+        int imageId = getKittyGraphicsImageId(graphics);
+        TerminalKittyImage image = imageId > 0 ? mKittyImages.get(imageId) : null;
+        if (image == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOENT +
+                ":No image with the id " + imageId + " found");
+            return;
+        }
+
+        if (!graphics.decodeImage()) {
+            sendKittyGraphicsResponse(graphics, graphics.getError());
+            return;
+        }
+
+        int x = Math.max(0, graphics.getX());
+        int y = Math.max(0, graphics.getY());
+        int width = Math.max(0, graphics.getSourceWidth());
+        int height = Math.max(0, graphics.getSourceHeight());
+        int baseFrameNumber = graphics.getAnimationBaseFrameNumber();
+        int frameNumber = graphics.getAnimationFrameNumber();
+
+        long previousSize = image.getByteCount();
+
+        boolean updated;
+        if (frameNumber > 0) {
+            updated = image.editFrame(frameNumber - 1, graphics.getBitmap(), x, y, width, height,
+                graphics.isFrameOverwriteMode());
+        } else {
+            updated = image.addFrame(graphics.getBitmap(), baseFrameNumber - 1, x, y, width, height,
+                graphics.getFrameBackgroundColor(), graphics.isFrameOverwriteMode(), graphics.getFrameGap());
+        }
+
+        if (!updated) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL +
+                ":Failed to create the animation frame");
+            return;
+        }
+
+        mKittyImagesSize += image.getByteCount() - previousSize;
+        evictKittyImages();
+
+        // Resume an animation that was waiting for more frames in loading mode.
+        if (frameNumber <= 0 && image.isLoading()) {
+            image.startAnimation(/* loading */ true, 0);
+            scheduleKittyAnimations();
+        }
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_ANIMATION_CONTROL} action, which stops or runs
+     * the animation of an image, and can change the current frame and the gap of a frame.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#controlling-animations
+     */
+    private void processKittyGraphicsAnimationControl(TerminalKittyGraphics graphics) {
+        int imageId = getKittyGraphicsImageId(graphics);
+        TerminalKittyImage image = imageId > 0 ? mKittyImages.get(imageId) : null;
+        if (image == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOENT +
+                ":No image with the id " + imageId + " found");
+            return;
+        }
+
+        int frameNumber = graphics.getAnimationFrameNumber();
+        int frameGap = graphics.getFrameGap();
+        if (frameNumber > 0 && frameGap != 0) image.setGap(frameNumber - 1, frameGap);
+
+        switch (graphics.getAnimationControl()) {
+            case TerminalKittyGraphics.ANIMATION_STOP:
+                image.stopAnimation();
+                break;
+            case TerminalKittyGraphics.ANIMATION_LOADING:
+                image.startAnimation(/* loading */ true, graphics.getAnimationLoopCount());
+                break;
+            case TerminalKittyGraphics.ANIMATION_RUN:
+                image.startAnimation(/* loading */ false, graphics.getAnimationLoopCount());
+                break;
+            default:
+                break;
+        }
+
+        int currentFrameNumber = graphics.getAnimationBaseFrameNumber();
+        if (currentFrameNumber > 0) image.setCurrentFrame(currentFrameNumber - 1);
+
+        updateKittyImagePlacements(imageId, image.getBitmap());
+        mSession.onScreenUpdate();
+        scheduleKittyAnimations();
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Process the {@link TerminalKittyGraphics#ACTION_FRAME_COMPOSE} action, which composes a
+     * rectangle of a frame onto another frame of the same image.
+     *
+     * - https://sw.kovidgoyal.net/kitty/graphics-protocol/#composing-animation-frames
+     */
+    private void processKittyGraphicsFrameCompose(TerminalKittyGraphics graphics) {
+        int imageId = getKittyGraphicsImageId(graphics);
+        TerminalKittyImage image = imageId > 0 ? mKittyImages.get(imageId) : null;
+        if (image == null) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_ENOENT +
+                ":No image with the id " + imageId + " found");
+            return;
+        }
+
+        long previousSize = image.getByteCount();
+
+        boolean composed = image.composeFrames(
+            graphics.getAnimationFrameNumber() - 1,
+            graphics.getAnimationBaseFrameNumber() - 1,
+            Math.max(0, graphics.getX()), Math.max(0, graphics.getY()),
+            Math.max(0, graphics.getCellPixelOffsetX()), Math.max(0, graphics.getCellPixelOffsetY()),
+            graphics.getW(), graphics.getH(),
+            graphics.isComposeOverwriteMode());
+
+        if (!composed) {
+            sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_EINVAL +
+                ":Failed to compose the animation frames");
+            return;
+        }
+
+        mKittyImagesSize += image.getByteCount() - previousSize;
+        updateKittyImagePlacements(imageId, image.getBitmap());
+        mSession.onScreenUpdate();
+
+        sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
+    }
+
+    /**
+     * Schedule the display of the next animation frames of all the running animations.
+     */
+    private void scheduleKittyAnimations() {
+        if (mKittyAnimationHandler == null)
+            mKittyAnimationHandler = new Handler(Looper.getMainLooper());
+        mKittyAnimationHandler.removeCallbacks(mKittyAnimationRunnable);
+
+        long delay = Long.MAX_VALUE;
+        for (TerminalKittyImage image : mKittyImages.values()) {
+            if (!image.isAnimating()) continue;
+            delay = Math.min(delay, image.getTimeUntilNextFrame());
+        }
+
+        if (delay == Long.MAX_VALUE) return;
+
+        mKittyAnimationHandler.postDelayed(mKittyAnimationRunnable, Math.max(16, delay));
+    }
+
+    /**
+     * Display the next frame of all the animations that are due, and reschedule the remaining ones.
+     */
+    private void updateKittyAnimations() {
+        boolean updated = false;
+
+        // Iterate over a copy of the ids since the placements may be updated.
+        for (Integer imageId : new ArrayList<>(mKittyImages.keySet())) {
+            TerminalKittyImage image = mKittyImages.get(imageId);
+            if (image == null || !image.isAnimating()) continue;
+
+            if (image.getTimeUntilNextFrame() > 0) continue;
+
+            if (!image.advanceFrame()) continue;
+
+            updateKittyImagePlacements(imageId, image.getBitmap());
+            updated = true;
+        }
+
+        if (updated) mSession.onScreenUpdate();
+
+        scheduleKittyAnimations();
+    }
+
+    /**
+     * Set the {@link Bitmap} of the frame currently being displayed by an image on all its
+     * placements, so that the next frame of the animation is rendered.
+     */
+    private void updateKittyImagePlacements(int imageId, Bitmap bitmap) {
+        for (KittyPlacement placement : mKittyPlacements) {
+            if (placement.mImageId != imageId) continue;
+
+            TerminalBitmap terminalBitmap = placement.mBuffer.getTerminalBitmapByNum(placement.mBitmapNum);
+            if (terminalBitmap != null) terminalBitmap.setBitmap(bitmap);
+        }
+    }
+
+    /**
+     * Stop all the running kitty graphics protocol image animations, which should be called when
+     * the terminal session is finished so that no more frames are scheduled.
+     */
+    public void stopKittyAnimations() {
+        if (mKittyAnimationHandler != null)
+            mKittyAnimationHandler.removeCallbacks(mKittyAnimationRunnable);
+
+        for (TerminalKittyImage image : mKittyImages.values()) {
+            image.stopAnimation();
+        }
+    }
+
+    /**
+     * Evict the images that are not placed on the screen, or the least recently used ones, until
+     * the storage quota of the kitty graphics protocol images is satisfied.
+     */
+    private void evictKittyImages() {
+        while (mKittyImages.size() > 1 &&
+            (mKittyImages.size() > KITTY_IMAGES_MAX_COUNT || mKittyImagesSize > KITTY_IMAGES_MAX_SIZE)) {
+            Integer imageIdToRemove = getKittyImageIdToEvict();
+            if (imageIdToRemove == null) break;
+            deleteKittyImage(imageIdToRemove, /* deletePlacements */ true);
         }
     }
 
@@ -3194,6 +3444,26 @@ public final class TerminalEmulator {
                     if (shouldFreeImageData) deleteKittyImage(imageId, /* deletePlacements */ false);
                 }
                 break;
+            case TerminalKittyGraphics.DELETE_FRAMES: {
+                TerminalKittyImage image = imageId > 0 ? mKittyImages.get(imageId) : null;
+                if (image != null) {
+                    long previousSize = image.getByteCount();
+                    image.clearFrames();
+                    mKittyImagesSize += image.getByteCount() - previousSize;
+                    updateKittyImagePlacements(imageId, image.getBitmap());
+                }
+                break;
+            }
+            case TerminalKittyGraphics.DELETE_BY_IMAGE_ID_RANGE: {
+                // The `x` and `y` keys are the image id range for this specifier.
+                int firstImageId = graphics.getX();
+                int lastImageId = graphics.getY();
+                for (Integer idToDelete : new ArrayList<>(mKittyImages.keySet())) {
+                    if (idToDelete >= firstImageId && idToDelete <= lastImageId)
+                        deleteKittyImage(idToDelete, shouldFreeImageData);
+                }
+                break;
+            }
             case TerminalKittyGraphics.DELETE_INTERSECTING_CURSOR:
                 deleteKittyPlacements(null, 0, mCursorCol + 1, mCursorRow + 1, null, null, null);
                 break;
@@ -3330,8 +3600,8 @@ public final class TerminalEmulator {
             deleteKittyImage(imageIdToRemove, /* deletePlacements */ true);
         }
 
-        Bitmap previousBitmap = mKittyImages.put(imageId, bitmap);
-        if (previousBitmap != null) mKittyImagesSize -= previousBitmap.getByteCount();
+        TerminalKittyImage previousImage = mKittyImages.put(imageId, new TerminalKittyImage(mClient, bitmap));
+        if (previousImage != null) mKittyImagesSize -= previousImage.getByteCount();
         mKittyImagesSize += imageSize;
 
         return true;
@@ -3343,16 +3613,16 @@ public final class TerminalEmulator {
      * images that are not placed on the screen, and finally the least recently used image.
      */
     private Integer getKittyImageIdToEvict() {
-        for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
+        for (Map.Entry<Integer, TerminalKittyImage> entry : mKittyImages.entrySet()) {
             if (mKittyImagesTransient.contains(entry.getKey()) && !isKittyImagePlaced(entry.getKey()))
                 return entry.getKey();
         }
 
-        for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
+        for (Map.Entry<Integer, TerminalKittyImage> entry : mKittyImages.entrySet()) {
             if (!isKittyImagePlaced(entry.getKey())) return entry.getKey();
         }
 
-        for (Map.Entry<Integer, Bitmap> entry : mKittyImages.entrySet()) {
+        for (Map.Entry<Integer, TerminalKittyImage> entry : mKittyImages.entrySet()) {
             return entry.getKey();
         }
 
@@ -3374,8 +3644,11 @@ public final class TerminalEmulator {
 
         if (deletePlacements) deleteKittyPlacements(imageId, 0, null, null, null, null, null);
 
-        Bitmap bitmap = mKittyImages.remove(imageId);
-        if (bitmap != null) mKittyImagesSize -= bitmap.getByteCount();
+        TerminalKittyImage image = mKittyImages.remove(imageId);
+        if (image != null) {
+            image.stopAnimation();
+            mKittyImagesSize -= image.getByteCount();
+        }
 
         mKittyImagesTransient.remove(imageId);
 
@@ -3411,6 +3684,13 @@ public final class TerminalEmulator {
 
     /** Clear all the images transmitted by the kitty graphics protocol. */
     private void clearKittyImages() {
+        if (mKittyAnimationHandler != null)
+            mKittyAnimationHandler.removeCallbacks(mKittyAnimationRunnable);
+
+        for (TerminalKittyImage image : mKittyImages.values()) {
+            image.stopAnimation();
+        }
+
         mKittyImages.clear();
         mKittyImagesSize = 0;
         mKittyImageNumbers.clear();

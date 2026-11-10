@@ -253,6 +253,9 @@ public final class TerminalSession extends TerminalOutput {
         mTerminalToProcessIOQueue.close();
         mProcessToTerminalIOQueue.close();
         JNI.close(mTerminalFileDescriptor);
+
+        // Stop any running kitty graphics protocol image animation so that no more frames are scheduled
+        if (mEmulator != null) mEmulator.stopKittyAnimations();
     }
 
     @Override
@@ -287,6 +290,11 @@ public final class TerminalSession extends TerminalOutput {
     @Override
     public void onColorsChanged() {
         mClient.onColorsChanged(this);
+    }
+
+    @Override
+    public void onScreenUpdate() {
+        notifyScreenUpdate();
     }
 
     public int getPid() {

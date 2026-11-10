@@ -55,8 +55,24 @@ public class TerminalKittyGraphics {
     public static final char ACTION_DELETE = 'd';
     /** Query the terminal for the support of a transmission medium or image format. */
     public static final char ACTION_QUERY = 'q';
+    /** Transmit the data for a frame of an image animation. */
+    public static final char ACTION_FRAME_TRANSMIT = 'f';
+    /** Control the animation of an image. */
+    public static final char ACTION_ANIMATION_CONTROL = 'a';
+    /** Compose the frames of an image animation. */
+    public static final char ACTION_FRAME_COMPOSE = 'c';
 
     public static final char DEFAULT_ACTION = ACTION_TRANSMIT;
+
+
+    /* The values for the `s` key of the animation control action. */
+
+    /** Stop the animation. */
+    public static final int ANIMATION_STOP = 1;
+    /** Run the animation, but wait for more frames when the last frame is reached. */
+    public static final int ANIMATION_LOADING = 2;
+    /** Run the animation, looping back to the first frame when the last frame is reached. */
+    public static final int ANIMATION_RUN = 3;
 
 
     /* The values for the `f` (format) key. */
@@ -102,6 +118,10 @@ public class TerminalKittyGraphics {
     public static final char DELETE_INTERSECTING_COLUMN = 'x';
     public static final char DELETE_INTERSECTING_ROW = 'y';
     public static final char DELETE_WITH_Z_INDEX = 'z';
+    /** Delete the animation frames of an image, keeping only its root frame. */
+    public static final char DELETE_FRAMES = 'f';
+    /** Delete all the images with an id in the range defined by the `x` and `y` keys. */
+    public static final char DELETE_BY_IMAGE_ID_RANGE = 'r';
 
     public static final char DEFAULT_DELETE = DELETE_ALL;
 
@@ -362,6 +382,59 @@ public class TerminalKittyGraphics {
         return mZIndex;
     }
 
+
+    /*
+     * The keys below have a different meaning for the animation actions (`a=f`, `a=a` and `a=c`)
+     * than for the other actions, so they are handled by dedicated getters.
+     */
+
+    /**
+     * Get the `c` key for the animation actions, which is the 1-based number of the frame whose
+     * image data serves as the base when creating a new frame, or the 1-based number of the frame
+     * to compose onto.
+     */
+    public int getAnimationBaseFrameNumber() {
+        return mColumns;
+    }
+
+    /**
+     * Get the `r` key for the animation actions, which is the 1-based number of the frame that is
+     * being edited, or the 1-based number of the frame to compose from.
+     */
+    public int getAnimationFrameNumber() {
+        return mRows;
+    }
+
+    /** Get the `s` key for the animation control action, which is one of the `ANIMATION_*` values. */
+    public int getAnimationControl() {
+        return mSourceWidth;
+    }
+
+    /** Get the `v` key for the animation control action, which is the number of loops to play. */
+    public int getAnimationLoopCount() {
+        return mSourceHeight;
+    }
+
+    /** Get the `z` key for the animation actions, which is the gap of a frame in milliseconds, negative for a gapless frame. */
+    public int getFrameGap() {
+        return mZIndex;
+    }
+
+    /** Get the `X` key for the animation frame transmit action, where `1` means the pixels are overwritten instead of blended. */
+    public boolean isFrameOverwriteMode() {
+        return mCellPixelOffsetX == 1;
+    }
+
+    /** Get the `C` key for the animation frame compose action, where `1` means the pixels are overwritten instead of blended. */
+    public boolean isComposeOverwriteMode() {
+        return mNoCursorMovement;
+    }
+
+    /** Get the `Y` key for the animation frame transmit action, which is the 32-bit `RGBA` background color. */
+    public int getFrameBackgroundColor() {
+        return mCellPixelOffsetY;
+    }
+
     public char getDeleteSpecifier() {
         return mDeleteSpecifier;
     }
@@ -604,7 +677,9 @@ public class TerminalKittyGraphics {
                 mCellPixelOffsetX = parseInt(value, "X", 0);
                 break;
             case 'Y':
-                mCellPixelOffsetY = parseInt(value, "Y", 0);
+                // The `Y` key is a pixel offset for the display actions, but a 32-bit `RGBA` background
+                // color for the animation frame transmit action, which does not fit in a signed int.
+                mCellPixelOffsetY = parseColor(value);
                 break;
             case 'c':
                 mColumns = parseInt(value, "c", 0);
@@ -674,6 +749,7 @@ public class TerminalKittyGraphics {
         switch (mAction) {
             case ACTION_TRANSMIT:
             case ACTION_TRANSMIT_AND_DISPLAY:
+            case ACTION_FRAME_TRANSMIT:
                 if (mFormat != FORMAT_RGB && mFormat != FORMAT_RGBA && mFormat != FORMAT_PNG) {
                     return setError(RESPONSE_EINVAL, "Unsupported image format " + mFormat);
                 }
@@ -683,6 +759,13 @@ public class TerminalKittyGraphics {
             case ACTION_DELETE:
                 break;
             case ACTION_QUERY:
+                break;
+            case ACTION_ANIMATION_CONTROL:
+                if (mSourceWidth < 0 || mSourceWidth > ANIMATION_RUN) {
+                    return setError(RESPONSE_EINVAL, "Unsupported animation control value " + mSourceWidth);
+                }
+                break;
+            case ACTION_FRAME_COMPOSE:
                 break;
             default:
                 return setError(RESPONSE_EINVAL, "Unsupported action \"" + mAction + "\"");
@@ -1026,6 +1109,9 @@ public class TerminalKittyGraphics {
             case ACTION_DISPLAY:
             case ACTION_DELETE:
             case ACTION_QUERY:
+            case ACTION_FRAME_TRANSMIT:
+            case ACTION_ANIMATION_CONTROL:
+            case ACTION_FRAME_COMPOSE:
                 return action;
             default:
                 setError(RESPONSE_EINVAL, "The action value \"" + value + "\" is not supported");
@@ -1039,6 +1125,16 @@ public class TerminalKittyGraphics {
             return 0;
         }
         return value.charAt(0);
+    }
+
+    /** Parse a 32-bit `RGBA` color value, which does not fit in a signed integer. */
+    private int parseColor(@NonNull String value) {
+        try {
+            return (int) Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            setError(RESPONSE_EINVAL, "The color value \"" + value + "\" is not a valid integer");
+            return 0;
+        }
     }
 
     private int parseInt(@NonNull String value, @NonNull String key, int def) {
