@@ -6,6 +6,12 @@ The fork adds two commits on top of upstream: `108f11d5` (*rendering optimizatio
 
 > Not an official Termux release. Report fork-specific issues here, not upstream.
 
+## Difference
+
+![](./resources/termux-extend-scroll.gif)
+
+![](./resources/termux-extend-kitty.gif)
+
 ## What's new
 
 **Rendering** (`108f11d5`)
