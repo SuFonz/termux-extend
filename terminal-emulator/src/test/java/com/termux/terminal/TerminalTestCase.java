@@ -22,6 +22,7 @@ public abstract class TerminalTestCase extends TestCase {
 		public final List<String> clipboardPuts = new ArrayList<>();
 		public int bellsRung = 0;
 		public int colorsChanged = 0;
+		public int screenUpdates = 0;
 
 		@Override
 		public void write(byte[] data, int offset, int count) {
@@ -56,6 +57,11 @@ public abstract class TerminalTestCase extends TestCase {
 		@Override
 		public void onColorsChanged() {
 			colorsChanged++;
+		}
+
+		@Override
+		public void onScreenUpdate() {
+			screenUpdates++;
 		}
 	}
 

@@ -52,6 +52,23 @@ public final class TerminalRow {
     /** If this row has a {@link TerminalBitmap}. Used for performance only. */
     public boolean mHasTerminalBitmap;
 
+    /**
+     * The column and the index in {@link #mText} that the scan of {@link #findStartOfColumn} had
+     * reached, used to continue the next scan from there.
+     *
+     * <p>Cells are normally written from left to right, and a row that contains a wide or a
+     * supplementary character cannot use the fast path of {@link #setChar}, so it scans the row for
+     * the index of the column it writes. Starting that scan from the first column every time makes
+     * writing such a row quadratic in the number of columns, which is very slow: a row holding a
+     * single emoji takes about 35 times longer to write than a plain row. Continuing from the
+     * previous position makes the scans amortized constant instead.</p>
+     */
+    private int mFindColumn;
+    private int mFindCharIndex;
+    /** Same as {@link #mFindColumn}, for {@link #wideDisplayCharacterStartingAt}. */
+    private int mWideColumn;
+    private int mWideCharIndex;
+
     /** Construct a blank row (containing only whitespace, ' ') with a specified style. */
     public TerminalRow(int columns, long style) {
         mColumns = columns;
@@ -84,6 +101,9 @@ public final class TerminalRow {
             }
             setChar(destinationX, codePoint, line.getStyle(sourceX1));
         }
+        // The source and the destination can be the same row, so the scan positions are dropped
+        // instead of trying to track how they moved.
+        resetColumnScanCache();
     }
 
     public int getSpaceUsed() {
@@ -94,9 +114,18 @@ public final class TerminalRow {
     public int findStartOfColumn(int column) {
         if (column == mColumns) return getSpaceUsed();
 
+        // Continue from the position of the previous scan when it is not past the requested column,
+        // see the documentation of mFindColumn. The loop below keeps the invariant that
+        // currentCharIndex is where the column currentColumn starts.
         int currentColumn = 0;
         int currentCharIndex = 0;
+        if (column >= mFindColumn) {
+            currentColumn = mFindColumn;
+            currentCharIndex = mFindCharIndex;
+        }
         while (true) { // 0<2 1 < 2
+            mFindColumn = currentColumn;
+            mFindCharIndex = currentCharIndex;
             int newCharIndex = currentCharIndex;
             char c = mText[newCharIndex++]; // cci=1, cci=2
             boolean isHigh = Character.isHighSurrogate(c);
@@ -130,7 +159,15 @@ public final class TerminalRow {
     }
 
     private boolean wideDisplayCharacterStartingAt(int column) {
-        for (int currentCharIndex = 0, currentColumn = 0; currentCharIndex < mSpaceUsed; ) {
+        int currentCharIndex = 0;
+        int currentColumn = 0;
+        if (column >= mWideColumn) {
+            currentCharIndex = mWideCharIndex;
+            currentColumn = mWideColumn;
+        }
+        for (; currentCharIndex < mSpaceUsed; ) {
+            mWideColumn = currentColumn;
+            mWideCharIndex = currentCharIndex;
             char c = mText[currentCharIndex++];
             int codePoint = Character.isHighSurrogate(c) ? Character.toCodePoint(c, mText[currentCharIndex++]) : c;
             int wcwidth = WcWidth.width(codePoint);
@@ -143,7 +180,16 @@ public final class TerminalRow {
         return false;
     }
 
+    /** Reset the cached scan positions, required when the text changed before them. */
+    private void resetColumnScanCache() {
+        mFindColumn = 0;
+        mFindCharIndex = 0;
+        mWideColumn = 0;
+        mWideCharIndex = 0;
+    }
+
     public void clear(long style) {
+        resetColumnScanCache();
         Arrays.fill(mText, ' ');
         Arrays.fill(mStyle, style);
         mSpaceUsed = mColumns;
@@ -275,6 +321,10 @@ public final class TerminalRow {
                 mSpaceUsed -= nextLen;
             }
         }
+
+        // The indices of the columns after the written one can have moved, so a scan position that is
+        // past the written column is not usable anymore.
+        if (columnToSet < mFindColumn || columnToSet < mWideColumn) resetColumnScanCache();
     }
 
     boolean isBlank() {

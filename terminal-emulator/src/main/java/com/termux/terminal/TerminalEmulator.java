@@ -821,6 +821,10 @@ public final class TerminalEmulator {
      * @param length the number of bytes in the array to process
      */
     public void append(byte[] buffer, int length) {
+        // Collect unused bitmaps once per batch of output instead of once per code point, which would
+        // mean acquiring the lock of the screen for every single character that is parsed.
+        mScreen.doTerminalBitmapsGC(300000);
+
         for (int i = 0; i < length; i++)
             processByte(buffer[i]);
     }
@@ -891,8 +895,6 @@ public final class TerminalEmulator {
     }
 
     public void processCodePoint(int b) {
-        mScreen.doTerminalBitmapsGC(300000);
-
         if (mEscapeState == ESC_OSC && mIsFastPathOsc) {
             mContinueSequence = false;
             receiveOsc(b);

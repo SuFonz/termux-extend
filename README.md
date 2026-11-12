@@ -2,7 +2,7 @@
 
 An unofficial, performance-focused build of the official [Termux](https://termux.dev) app, forked from [termux/termux-app](https://github.com/termux/termux-app) (`master` @ `8629e632`).
 
-The fork adds two commits on top of upstream: `108f11d5` (*rendering optimization*) and a **kitty graphics protocol** implementation. Everything else is upstream.
+The fork adds two commits on top of upstream: `108f11d5` (*rendering optimization*) and a **kitty graphics protocol** implementation, plus a **terminal emulator parsing optimization**. Everything else is upstream.
 
 > Not an official Termux release. Report fork-specific issues here, not upstream.
 
@@ -16,6 +16,11 @@ The fork adds two commits on top of upstream: `108f11d5` (*rendering optimizatio
 - **Frame-driven fling** — `post()` replaced with `postOnAnimation()`, so scrolling updates at most once per frame.
 - **Single invalidation per scroll** — one `invalidate()` per batch instead of one per row.
 - **Java 17** — `app`, `terminal-emulator` and `terminal-view` now target Java 17.
+
+**Terminal emulator**
+
+- **Column scan cache** — a row that holds a wide or a supplementary character cannot use the fast path of `TerminalRow.setChar()`, so it scanned the row from the first column to find the index of the column being written, once for the written cell and twice more to check for wide characters. That made writing such a row quadratic in the number of columns, and since a syntax highlighted application like LazyVim uses Nerd Font icons that live in the supplementary plane, nearly every row took that path. The scan now continues from where the previous one ended and starts over only when the text before that position changed. Measured on a 127 column row: 460 → 47 ns per cell, and the cost no longer grows with the column index.
+- **Bitmap collection per batch** — unused `TerminalBitmap`s are collected once per `append()` batch instead of once per code point, which no longer takes the lock of the screen for every parsed character. The collection is throttled to once every 300 seconds, so its behaviour is unchanged.
 
 **Kitty graphics protocol**
 
