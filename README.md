@@ -58,6 +58,16 @@ The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **ki
   then run `termux-reload-settings`.
 - Not implemented: the alternate keys flag (`4`), which reports the shifted and base layout keys.
 
+**Input method composing**
+
+- The `inputType` that is advertised to the input method can now have a text class set, which is required for the languages whose input methods convert what is typed into other characters, like Chinese, Japanese or Korean. Without a text class the input methods disable their composing, suggestions and long press popups, so only the characters that have their own key could be entered and those languages had to be pasted in from another text field.
+- The normal text variation is used instead of the password variation, since the password variations make the input methods hide the language switch and leave the field stuck on the primary language. The suggestions flag keeps the autocorrect and the suggestions away, which would otherwise corrupt the terminal input.
+- Off by default. Enable it in `~/.termux/termux.properties`:
+
+    terminal-ime-composing = true
+
+  then run `termux-reload-settings`.
+
 ## Compatibility
 
 - Package name is still `com.termux`, so this **replaces** the official app. It cannot be installed alongside it, and the official app has to be uninstalled first (different signing key).

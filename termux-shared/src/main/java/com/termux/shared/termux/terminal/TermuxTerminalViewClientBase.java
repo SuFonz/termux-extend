@@ -29,6 +29,10 @@ public class TermuxTerminalViewClientBase implements TerminalViewClient {
         return false;
     }
 
+    public boolean shouldImeComposingBeEnabled() {
+        return false;
+    }
+
     public boolean shouldUseCtrlSpaceWorkaround() {
         return false;
     }

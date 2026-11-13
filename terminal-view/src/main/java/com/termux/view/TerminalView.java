@@ -315,7 +315,21 @@ public final class TerminalView extends View {
         // initially started with the alternate view or if activity is returned to from another app
         // and the alternate view was the one selected the last time.
         if (mClient.isTerminalViewSelected()) {
-            if (mClient.shouldEnforceCharBasedInput()) {
+            if (mClient.shouldImeComposingBeEnabled()) {
+                // A valid text class is required for the input methods to provide their full features,
+                // like composing the text for the languages that do not have a key for every character,
+                // since the input methods that check the class disable those features and only report the
+                // raw keys when it is not set.
+                //
+                // The normal variation is used instead of `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`, since
+                // the password variations make the input methods treat the field as a password field and
+                // hide the language switch, which would leave the field stuck on the primary language.
+                // The suggestions flag alone keeps the autocorrect and the suggestions away, and the
+                // automatic capitalization is off since `TYPE_TEXT_FLAG_CAP_SENTENCES` is not set.
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_VARIATION_NORMAL
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            } else if (mClient.shouldEnforceCharBasedInput()) {
                 // Some keyboards seems do not reset the internal state on TYPE_NULL.
                 // Affects mostly Samsung stock keyboards.
                 // https://github.com/termux/termux-app/issues/686

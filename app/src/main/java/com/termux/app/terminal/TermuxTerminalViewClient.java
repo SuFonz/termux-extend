@@ -217,6 +217,11 @@ public class TermuxTerminalViewClient extends TermuxTerminalViewClientBase {
     }
 
     @Override
+    public boolean shouldImeComposingBeEnabled() {
+        return mActivity.getProperties().isUsingImeComposing();
+    }
+
+    @Override
     public boolean shouldUseCtrlSpaceWorkaround() {
         return mActivity.getProperties().isUsingCtrlSpaceWorkaround();
     }

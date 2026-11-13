@@ -83,6 +83,9 @@ import java.util.Set;
  *
  * - 0.19.0 (2026-11-10)
  *      - Add `KEY_KITTY_GRAPHICS`.
+ *
+ * - 0.20.0 (2026-11-13)
+ *      - Add `KEY_KITTY_KEYBOARD` and `KEY_TERMINAL_IME_COMPOSING`.
  */
 
 /**
@@ -243,6 +246,11 @@ public final class TermuxPropertyConstants {
     public static final int IVALUE_DELETE_TMPDIR_FILES_OLDER_THAN_X_DAYS_ON_EXIT_MIN = -1;
     public static final int IVALUE_DELETE_TMPDIR_FILES_OLDER_THAN_X_DAYS_ON_EXIT_MAX = 100000;
     public static final int DEFAULT_IVALUE_DELETE_TMPDIR_FILES_OLDER_THAN_X_DAYS_ON_EXIT = 3;
+
+
+
+    /** Defines the key for whether the input method should be allowed to compose text, which is required for the languages whose input methods convert what is typed into other characters, like Chinese, Japanese or Korean */
+    public static final String KEY_TERMINAL_IME_COMPOSING =  "terminal-ime-composing"; // Default: "terminal-ime-composing"
 
 
 
@@ -414,6 +422,7 @@ public final class TermuxPropertyConstants {
         KEY_KITTY_GRAPHICS,
         KEY_KITTY_KEYBOARD,
         KEY_RUN_TERMUX_AM_SOCKET_SERVER,
+        KEY_TERMINAL_IME_COMPOSING,
         KEY_TERMINAL_ONCLICK_URL_OPEN,
         KEY_USE_CTRL_SPACE_WORKAROUND,
         KEY_USE_FULLSCREEN,
@@ -462,6 +471,7 @@ public final class TermuxPropertyConstants {
         KEY_HIDE_SOFT_KEYBOARD_ON_STARTUP,
         KEY_KITTY_GRAPHICS,
         KEY_KITTY_KEYBOARD,
+        KEY_TERMINAL_IME_COMPOSING,
         KEY_TERMINAL_ONCLICK_URL_OPEN,
         KEY_USE_CTRL_SPACE_WORKAROUND,
         KEY_USE_FULLSCREEN,

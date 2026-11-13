@@ -32,6 +32,16 @@ public interface TerminalViewClient {
 
     boolean shouldEnforceCharBasedInput();
 
+    /**
+     * Whether the input method should be allowed to compose text, which is required for the languages
+     * whose input methods convert what is typed into other characters, like Chinese, Japanese or Korean.
+     *
+     * When this is disabled, the input type advertised to the input method does not have a text class
+     * set, which makes the input methods that check it disable their features and only report the raw
+     * keys, so only the characters that have their own key can be entered.
+     */
+    boolean shouldImeComposingBeEnabled();
+
     boolean shouldUseCtrlSpaceWorkaround();
 
     boolean isTerminalViewSelected();
