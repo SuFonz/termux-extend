@@ -610,6 +610,10 @@ public abstract class TermuxSharedProperties {
         return (boolean) getInternalPropertyValue(TermuxPropertyConstants.KEY_KITTY_GRAPHICS, true);
     }
 
+    public boolean isKittyKeyboardEnabled() {
+        return (boolean) getInternalPropertyValue(TermuxPropertyConstants.KEY_KITTY_KEYBOARD, true);
+    }
+
     public boolean shouldRunTermuxAmSocketServer() {
         return (boolean) getInternalPropertyValue(TermuxPropertyConstants.KEY_RUN_TERMUX_AM_SOCKET_SERVER, true);
     }

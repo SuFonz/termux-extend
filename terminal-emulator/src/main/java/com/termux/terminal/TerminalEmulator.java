@@ -442,6 +442,101 @@ public final class TerminalEmulator {
     }
 
 
+    /**
+     * If the kitty keyboard protocol must be enabled to report key events in its extended encoding.
+     *
+     * The value can be set by the app based on a user preference like
+     * `TermuxPropertyConstants.KEY_KITTY_KEYBOARD` in `termux.properties`. It is a `static` variable
+     * so that the value can be updated for all the existing terminal sessions without having to
+     * recreate them, since the value is updated when `termux-reload-settings` is run.
+     */
+    private static boolean KITTY_KEYBOARD_ENABLED = false;
+
+    /** The max depth of {@link #mKittyKeyboardFlagsStack}. */
+    private static final int KITTY_KEYBOARD_FLAGS_STACK_MAX_SIZE = 64;
+
+    /**
+     * The flags of the kitty keyboard protocol that the client asked for, which tell which key events
+     * must be reported in the extended encoding instead of the legacy one.
+     *
+     * The flags are set by the `CSI > flags u`, `CSI = flags ; mode u` and `CSI < number u` commands,
+     * and their values are defined as `KeyHandler.KITTY_KEYBOARD_FLAG_*`.
+     *
+     * - https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+     */
+    private int mKittyKeyboardFlags;
+
+    /** The stack of {@link #mKittyKeyboardFlags} for the `CSI > flags u` and `CSI < number u` commands. */
+    private final int[] mKittyKeyboardFlagsStack = new int[KITTY_KEYBOARD_FLAGS_STACK_MAX_SIZE];
+
+    /** The number of entries in {@link #mKittyKeyboardFlagsStack}. */
+    private int mKittyKeyboardFlagsStackSize;
+
+    /**
+     * Whether the private parameter byte of the CSI sequence being parsed was `<` instead of `=`,
+     * which distinguishes the `CSI < number u` and `CSI = flags ; mode u` commands. Both are parsed
+     * by {@link #doCsiUnsupportedParameterOrIntermediateByte(int)}.
+     */
+    private boolean mCsiPrivateParameterIsLessThan;
+
+
+    /** Set whether the kitty keyboard protocol must be enabled. */
+    public static void setKittyKeyboardEnabled(boolean enabled) {
+        KITTY_KEYBOARD_ENABLED = enabled;
+    }
+
+    public static boolean isKittyKeyboardEnabled() {
+        return KITTY_KEYBOARD_ENABLED;
+    }
+
+    /**
+     * Get the flags of the kitty keyboard protocol that the client asked for.
+     *
+     * @return Returns the flags, see `KeyHandler.KITTY_KEYBOARD_FLAG_*`, or `0` if the protocol is
+     * disabled or the client did not ask for any enhancement, in which case key events must be
+     * reported with the legacy encoding.
+     */
+    public int getKittyKeyboardFlags() {
+        return KITTY_KEYBOARD_ENABLED ? mKittyKeyboardFlags : 0;
+    }
+
+    /** Push {@link #mKittyKeyboardFlags} and set the new flags, for the `CSI > flags u` command. */
+    private void pushKittyKeyboardFlags(int flags) {
+        if (mKittyKeyboardFlagsStackSize < KITTY_KEYBOARD_FLAGS_STACK_MAX_SIZE) {
+            mKittyKeyboardFlagsStack[mKittyKeyboardFlagsStackSize++] = mKittyKeyboardFlags;
+        }
+        mKittyKeyboardFlags = flags;
+    }
+
+    /** Pop the given number of entries of the flags stack, for the `CSI < number u` command. */
+    private void popKittyKeyboardFlags(int number) {
+        while (number-- > 0 && mKittyKeyboardFlagsStackSize > 0) {
+            mKittyKeyboardFlags = mKittyKeyboardFlagsStack[--mKittyKeyboardFlagsStackSize];
+        }
+    }
+
+    /**
+     * Modify {@link #mKittyKeyboardFlags}, for the `CSI = flags ; mode u` command.
+     *
+     * @param flags The flags to apply.
+     * @param mode `1` to replace the flags, `2` to add them and `3` to remove them.
+     */
+    private void setKittyKeyboardFlags(int flags, int mode) {
+        switch (mode) {
+            case 1:
+                mKittyKeyboardFlags = flags;
+                break;
+            case 3:
+                mKittyKeyboardFlags &= ~flags;
+                break;
+            case 2:
+            default:
+                mKittyKeyboardFlags |= flags;
+                break;
+        }
+    }
+
+
 
     /**
      * A placement of an image transmitted by the kitty graphics protocol on a {@link TerminalBuffer}.
@@ -1870,12 +1965,27 @@ public final class TerminalEmulator {
         if (mEscapeState == ESC_CSI_UNSUPPORTED_PARAMETER_BYTE && b >= 0x30 && b <= 0x3F) {
             // Supported `0–9:;>?` or unsupported `<=` parameter byte after an
             // initial unsupported parameter byte in `doCsi()`, or a sequential parameter byte.
-            continueSequence(ESC_CSI_UNSUPPORTED_PARAMETER_BYTE);
+            // The parameters are collected so that the kitty keyboard protocol commands can use them,
+            // the bytes that are not part of a parameter are only skipped over.
+            if ((b >= '0' && b <= '9') || b == ';' || b == ':') {
+                parseArg(b);
+            } else {
+                continueSequence(ESC_CSI_UNSUPPORTED_PARAMETER_BYTE);
+            }
         } else if (b >= 0x20 && b <= 0x2F) {
             // Optional intermediate byte `!"#$%&'()*+,-./` after parameter or intermediate byte.
             continueSequence(ESC_CSI_UNSUPPORTED_INTERMEDIATE_BYTE);
         } else if (b >= 0x40 && b <= 0x7E) {
             // Final byte `@A–Z[\]^_`a–z{|}~` after parameter or intermediate byte.
+            if (b == 'u' && mEscapeState == ESC_CSI_UNSUPPORTED_PARAMETER_BYTE && KITTY_KEYBOARD_ENABLED) {
+                // "${CSI}<${number}u" pops the kitty keyboard protocol flags stack, while
+                // "${CSI}=${flags};${mode}u" modifies the flags (kitty keyboard protocol).
+                if (mCsiPrivateParameterIsLessThan) {
+                    popKittyKeyboardFlags(getArg0(1));
+                } else {
+                    setKittyKeyboardFlags(getArg0(0), getArg1(2));
+                }
+            }
             // Calling `unknownSequence()` would log an error with only a final byte, so ignore it for now.
             finishSequence();
         } else {
@@ -1886,6 +1996,9 @@ public final class TerminalEmulator {
     /** Process byte while in the {@link #ESC_CSI_QUESTIONMARK} escape state. */
     private void doCsiQuestionMark(int b) {
         switch (b) {
+            case 'u': // "${CSI}?u" - Report the kitty keyboard protocol flags (kitty keyboard protocol).
+                if (KITTY_KEYBOARD_ENABLED) mSession.write("\033[?" + mKittyKeyboardFlags + "u");
+                break;
             case 'J': // Selective erase in display (DECSED) - http://www.vt100.net/docs/vt510-rm/DECSED.
             case 'K': // Selective erase in line (DECSEL) - http://vt100.net/docs/vt510-rm/DECSEL.
                 mAboutToAutoWrap = false;
@@ -2146,6 +2259,10 @@ public final class TerminalEmulator {
                 // some special control character cases, e.g., Control-Space to make a NUL.
                 // (2) enables this feature for keys including the exceptions listed.
                 Logger.logError(mClient, LOG_TAG, "(ignored) CSI > MODIFY RESOURCE: " + getArg0(-1) + " to " + getArg1(-1));
+                break;
+            case 'u': // "${CSI}>${flags}u" - Push the kitty keyboard protocol flags (kitty keyboard protocol).
+                if (!KITTY_KEYBOARD_ENABLED) break;
+                pushKittyKeyboardFlags(getArg0(0));
                 break;
             default:
                 parseArg(b);
@@ -2498,7 +2615,11 @@ public final class TerminalEmulator {
                 continueSequence(ESC_CSI_BIGGERTHAN);
                 break;
             case '<': // "Esc [ <" -- start of a private parameter byte
+                mCsiPrivateParameterIsLessThan = true;
+                continueSequence(ESC_CSI_UNSUPPORTED_PARAMETER_BYTE);
+                break;
             case '=': // "Esc [ =" -- start of a private parameter byte
+                mCsiPrivateParameterIsLessThan = false;
                 continueSequence(ESC_CSI_UNSUPPORTED_PARAMETER_BYTE);
                 break;
             case '`': // Horizontal position absolute (HPA - http://www.vt100.net/docs/vt510-rm/HPA).
@@ -4699,6 +4820,10 @@ public final class TerminalEmulator {
         // back and the screen would never be redrawn again.
         mSynchronizedOutputActive = false;
         mScreenUpdateHeld = false;
+        // A reset drops the kitty keyboard protocol flags as well, so that key events are reported with
+        // the legacy encoding again.
+        mKittyKeyboardFlags = 0;
+        mKittyKeyboardFlagsStackSize = 0;
         mInsertMode = false;
         mTopMargin = mLeftMargin = 0;
         mBottomMargin = mRows;

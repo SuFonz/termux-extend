@@ -2,7 +2,7 @@
 
 An unofficial, performance-focused build of the official [Termux](https://termux.dev) app, forked from [termux/termux-app](https://github.com/termux/termux-app) (`master` @ `8629e632`).
 
-The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **kitty graphics protocol** implementation, and a **performance pass** over the terminal emulator and the renderer, including support for the synchronized output mode. Everything else is upstream.
+The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **kitty graphics protocol** implementation, a **kitty keyboard protocol** implementation, and a **performance pass** over the terminal emulator and the renderer, including support for the synchronized output mode. Everything else is upstream.
 
 > Not an official Termux release. Report fork-specific issues here, not upstream.
 
@@ -44,6 +44,19 @@ The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **ki
 
   then run `termux-reload-settings`. Works with `kitten icat`, `chafa --format kitty`, `timg --kitty`.
 - Images use the same cell bitmap model as sixel, so they scroll with the text. Not implemented: unicode placeholders and z-index stacking.
+
+**Kitty keyboard protocol**
+
+- `CSI > flags u`, `CSI = flags ; mode u` and `CSI < number u` push, change and pop the flags that tell which key events are reported with the extended `CSI key ; modifiers : event-type ; text u` encoding, and `CSI ? u` reports the current ones.
+- The disambiguate flag reports the keys that are ambiguous in the legacy encoding, like escape, enter, tab, backspace and the keys with ctrl or alt, as escape codes instead of control characters. The flag to report all keys does the same for every key, including the functional keys. The event types flag adds press, repeat and release, and the text flag adds the text that the key produces.
+- Off by default. Enable it in `~/.termux/termux.properties`:
+
+  ```properties
+  kitty-keyboard=true
+  ```
+
+  then run `termux-reload-settings`.
+- Not implemented: the alternate keys flag (`4`), which reports the shifted and base layout keys.
 
 ## Compatibility
 

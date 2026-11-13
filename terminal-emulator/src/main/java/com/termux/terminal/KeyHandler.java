@@ -27,6 +27,7 @@ import static android.view.KeyEvent.KEYCODE_F8;
 import static android.view.KeyEvent.KEYCODE_F9;
 import static android.view.KeyEvent.KEYCODE_FORWARD_DEL;
 import static android.view.KeyEvent.KEYCODE_INSERT;
+import static android.view.KeyEvent.KEYCODE_MENU;
 import static android.view.KeyEvent.KEYCODE_MOVE_END;
 import static android.view.KeyEvent.KEYCODE_MOVE_HOME;
 import static android.view.KeyEvent.KEYCODE_NUMPAD_0;
@@ -60,6 +61,46 @@ public final class KeyHandler {
     public static final int KEYMOD_CTRL = 0x40000000;
     public static final int KEYMOD_SHIFT = 0x20000000;
     public static final int KEYMOD_NUM_LOCK = 0x10000000;
+
+    /**
+     * The flags of the kitty keyboard protocol that the client can ask for, see
+     * {@link #getKittyKeyboardCode} and https://sw.kovidgoyal.net/kitty/keyboard-protocol/ .
+     */
+    /** Report the keys that are ambiguous in the legacy encoding with the extended encoding. */
+    public static final int KITTY_KEYBOARD_FLAG_DISAMBIGUATE_ESCAPE_CODES = 1;
+    /** Report the press, repeat and release event types instead of only the press. */
+    public static final int KITTY_KEYBOARD_FLAG_REPORT_EVENT_TYPES = 2;
+    /** Report the shifted and base layout keys, which is not implemented. */
+    public static final int KITTY_KEYBOARD_FLAG_REPORT_ALTERNATE_KEYS = 4;
+    /** Report all keys with the extended encoding, not just the ambiguous ones. */
+    public static final int KITTY_KEYBOARD_FLAG_REPORT_ALL_KEYS_AS_ESCAPE_CODES = 8;
+    /** Report the text that the key produces along with the key itself. */
+    public static final int KITTY_KEYBOARD_FLAG_REPORT_ASSOCIATED_TEXT = 16;
+
+    /** The event types of the kitty keyboard protocol. */
+    public static final int KITTY_KEYBOARD_EVENT_TYPE_PRESS = 1;
+    public static final int KITTY_KEYBOARD_EVENT_TYPE_REPEAT = 2;
+    public static final int KITTY_KEYBOARD_EVENT_TYPE_RELEASE = 3;
+
+    /**
+     * The code points that the kitty keyboard protocol reports for keys that do not produce text,
+     * which are in the private use area, see {@link #getKittyKeyboardFunctionalKeyCode}.
+     */
+    private static final int KITTY_KEYBOARD_KEYCODE_INSERT = 57348;
+    private static final int KITTY_KEYBOARD_KEYCODE_DELETE = 57349;
+    private static final int KITTY_KEYBOARD_KEYCODE_LEFT = 57350;
+    private static final int KITTY_KEYBOARD_KEYCODE_RIGHT = 57351;
+    private static final int KITTY_KEYBOARD_KEYCODE_UP = 57352;
+    private static final int KITTY_KEYBOARD_KEYCODE_DOWN = 57353;
+    private static final int KITTY_KEYBOARD_KEYCODE_PAGE_UP = 57354;
+    private static final int KITTY_KEYBOARD_KEYCODE_PAGE_DOWN = 57355;
+    private static final int KITTY_KEYBOARD_KEYCODE_HOME = 57356;
+    private static final int KITTY_KEYBOARD_KEYCODE_END = 57357;
+    private static final int KITTY_KEYBOARD_KEYCODE_NUM_LOCK = 57360;
+    private static final int KITTY_KEYBOARD_KEYCODE_PRINT_SCREEN = 57361;
+    private static final int KITTY_KEYBOARD_KEYCODE_PAUSE = 57362;
+    private static final int KITTY_KEYBOARD_KEYCODE_MENU = 57363;
+    private static final int KITTY_KEYBOARD_KEYCODE_F1 = 57364;
 
     private static final Map<String, Integer> TERMCAP_TO_KEYCODE = new HashMap<>();
 
@@ -369,5 +410,162 @@ public final class KeyHandler {
                 return start + lastChar;
         }
         return start + (";" + modifier) + lastChar;
+    }
+
+
+    /**
+     * Get the code point that the kitty keyboard protocol reports for a key that does not produce
+     * text, or `-1` if the protocol does not define one for the key.
+     *
+     * The keys that do produce text, like letters, digits and punctuation, are reported with the code
+     * point that the key produces instead, see {@link #getKittyKeyboardCode}.
+     */
+    private static int getKittyKeyboardFunctionalKeyCode(int keyCode) {
+        switch (keyCode) {
+            case KEYCODE_INSERT:
+                return KITTY_KEYBOARD_KEYCODE_INSERT;
+            case KEYCODE_FORWARD_DEL:
+                return KITTY_KEYBOARD_KEYCODE_DELETE;
+            case KEYCODE_DPAD_LEFT:
+                return KITTY_KEYBOARD_KEYCODE_LEFT;
+            case KEYCODE_DPAD_RIGHT:
+                return KITTY_KEYBOARD_KEYCODE_RIGHT;
+            case KEYCODE_DPAD_UP:
+                return KITTY_KEYBOARD_KEYCODE_UP;
+            case KEYCODE_DPAD_DOWN:
+                return KITTY_KEYBOARD_KEYCODE_DOWN;
+            case KEYCODE_PAGE_UP:
+                return KITTY_KEYBOARD_KEYCODE_PAGE_UP;
+            case KEYCODE_PAGE_DOWN:
+                return KITTY_KEYBOARD_KEYCODE_PAGE_DOWN;
+            case KEYCODE_MOVE_HOME:
+                return KITTY_KEYBOARD_KEYCODE_HOME;
+            case KEYCODE_MOVE_END:
+                return KITTY_KEYBOARD_KEYCODE_END;
+            case KEYCODE_NUM_LOCK:
+                return KITTY_KEYBOARD_KEYCODE_NUM_LOCK;
+            case KEYCODE_SYSRQ:
+                return KITTY_KEYBOARD_KEYCODE_PRINT_SCREEN;
+            case KEYCODE_BREAK:
+                return KITTY_KEYBOARD_KEYCODE_PAUSE;
+            case KEYCODE_MENU:
+                return KITTY_KEYBOARD_KEYCODE_MENU;
+            default:
+                // The function keys are the contiguous KEYCODE_F1 to KEYCODE_F12.
+                if (keyCode >= KEYCODE_F1 && keyCode <= KEYCODE_F12)
+                    return KITTY_KEYBOARD_KEYCODE_F1 + (keyCode - KEYCODE_F1);
+                return -1;
+        }
+    }
+
+    /**
+     * Whether a key is ambiguous in the legacy encoding, which is the case for the keys that legacy
+     * report a control character or that have a control or alt modifier, see
+     * {@link #KITTY_KEYBOARD_FLAG_DISAMBIGUATE_ESCAPE_CODES}.
+     */
+    private static boolean isKittyKeyboardAmbiguousKey(int keyCode, int keyMode) {
+        switch (keyCode) {
+            case KEYCODE_ESCAPE:
+            case KEYCODE_ENTER:
+            case KEYCODE_TAB:
+            case KEYCODE_DEL:
+                return true;
+            default:
+                return (keyMode & (KEYMOD_CTRL | KEYMOD_ALT)) != 0;
+        }
+    }
+
+    /**
+     * Get the code to send for a key event using the kitty keyboard protocol.
+     *
+     * The extended encoding is `CSI unicode-key-code ; modifiers : event-type ; text u`, where the
+     * modifiers and the event type and the text are only included if the client asked for them and if
+     * they are not the defaults.
+     *
+     * Only the keys that are ambiguous in the legacy encoding are reported with it, unless the client
+     * asked for all the keys with {@link #KITTY_KEYBOARD_FLAG_REPORT_ALL_KEYS_AS_ESCAPE_CODES}.
+     *
+     * - https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+     *
+     * @param keyCode The Android key code of the key, like `KEYCODE_DPAD_UP` or `KEYCODE_A`.
+     * @param keyMode The modifiers of the key event, one or more of the `KEYMOD_*` values.
+     * @param flags The flags that the client asked for, one or more of the `KITTY_KEYBOARD_FLAG_*` values.
+     * @param eventType The type of the event, one of the `KITTY_KEYBOARD_EVENT_TYPE_*` values.
+     * @param unicodeKeyCode The unshifted code point that the key produces, or `-1` if it produces none.
+     * @return Returns the code to send, or `null` if the key must be sent with the legacy encoding.
+     */
+    public static String getKittyKeyboardCode(int keyCode, int keyMode, int flags, int eventType, int unicodeKeyCode) {
+        if (flags == 0) return null;
+
+        // The code point that is reported for the key itself, which is not the text that the key
+        // produces, so a shifted key is reported with the code point it has without shift.
+        final int kittyKeyCode;
+        final boolean producesText;
+        switch (keyCode) {
+            case KEYCODE_ESCAPE:
+                kittyKeyCode = 27;
+                producesText = false;
+                break;
+            case KEYCODE_ENTER:
+                kittyKeyCode = 13;
+                producesText = false;
+                break;
+            case KEYCODE_TAB:
+                kittyKeyCode = 9;
+                producesText = false;
+                break;
+            case KEYCODE_DEL:
+                kittyKeyCode = 127;
+                producesText = false;
+                break;
+            default:
+                if (unicodeKeyCode > 0) {
+                    kittyKeyCode = unicodeKeyCode;
+                    producesText = true;
+                } else {
+                    kittyKeyCode = getKittyKeyboardFunctionalKeyCode(keyCode);
+                    producesText = false;
+                    if (kittyKeyCode < 0) return null;
+                }
+                break;
+        }
+
+        // The remaining flags only change how the keys that are reported are encoded, so the keys that
+        // are not reported must keep the legacy encoding.
+        final boolean reportAllKeys = (flags & KITTY_KEYBOARD_FLAG_REPORT_ALL_KEYS_AS_ESCAPE_CODES) != 0;
+        if (!reportAllKeys) {
+            if ((flags & KITTY_KEYBOARD_FLAG_DISAMBIGUATE_ESCAPE_CODES) == 0) return null;
+            if (!isKittyKeyboardAmbiguousKey(keyCode, keyMode)) return null;
+        }
+
+        final StringBuilder code = new StringBuilder("\033[");
+        code.append(kittyKeyCode);
+
+        // The modifiers are encoded as in the legacy encoding, as `1` plus the bit mask, and are
+        // omitted when there are none. The mask is added instead of being or-ed in, since the bit for
+        // shift is the same as the lowest bit of the `1` that is added.
+        int modifiersMask = 0;
+        if ((keyMode & KEYMOD_SHIFT) != 0) modifiersMask |= 0x01;
+        if ((keyMode & KEYMOD_ALT) != 0) modifiersMask |= 0x02;
+        if ((keyMode & KEYMOD_CTRL) != 0) modifiersMask |= 0x04;
+        if ((keyMode & KEYMOD_NUM_LOCK) != 0) modifiersMask |= 0x80;
+        final int modifiers = 1 + modifiersMask;
+
+        // A press is the default event type and is omitted, the same for modifiers that are not set.
+        final boolean reportEventType = (flags & KITTY_KEYBOARD_FLAG_REPORT_EVENT_TYPES) != 0
+            && eventType != KITTY_KEYBOARD_EVENT_TYPE_PRESS;
+
+        // The text is only reported for the keys that produce text and that are not modified with ctrl
+        // or alt, which change the text in a way that the application has to handle itself.
+        final boolean reportText = (flags & KITTY_KEYBOARD_FLAG_REPORT_ASSOCIATED_TEXT) != 0
+            && producesText && (keyMode & (KEYMOD_CTRL | KEYMOD_ALT)) == 0;
+
+        if (modifiers != 1 || reportEventType || reportText) {
+            code.append(';').append(modifiers);
+            if (reportEventType) code.append(':').append(eventType);
+        }
+        if (reportText) code.append(';').append(kittyKeyCode);
+        code.append('u');
+        return code.toString();
     }
 }

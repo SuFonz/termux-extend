@@ -451,6 +451,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         // when `termux-reload-settings` is run, without having to restart the sessions.
         TerminalEmulator.setKittyGraphicsEnabled(mProperties.isKittyGraphicsEnabled());
 
+        // Set whether the kitty keyboard protocol should be supported by the terminal, for the same
+        // reason as above.
+        TerminalEmulator.setKittyKeyboardEnabled(mProperties.isKittyKeyboardEnabled());
+
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onReloadProperties();
     }

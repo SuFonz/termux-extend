@@ -805,6 +805,27 @@ public final class TerminalView extends View {
         if (event.isAltPressed() || leftAltDown) keyMod |= KeyHandler.KEYMOD_ALT;
         if (shiftDown) keyMod |= KeyHandler.KEYMOD_SHIFT;
         if (event.isNumLockOn()) keyMod |= KeyHandler.KEYMOD_NUM_LOCK;
+
+        // Keys that the view handles itself, like scrolling the scrollback with shift+page_up, must not
+        // be reported to the application.
+        if (handleKeyCodeAction(keyCode, keyMod)) return true;
+
+        // Report the key event with the extended encoding if the client asked for it with the kitty
+        // keyboard protocol. The unshifted code point of the key is reported, since the protocol reports
+        // the key itself and its modifiers separately.
+        final int kittyKeyboardFlags = mEmulator.getKittyKeyboardFlags();
+        if (kittyKeyboardFlags != 0 && mTermSession != null) {
+            final boolean isRepeat = event.getRepeatCount() > 0;
+            final String kittyCode = KeyHandler.getKittyKeyboardCode(keyCode, keyMod, kittyKeyboardFlags,
+                isRepeat ? KeyHandler.KITTY_KEYBOARD_EVENT_TYPE_REPEAT : KeyHandler.KITTY_KEYBOARD_EVENT_TYPE_PRESS,
+                event.getUnicodeChar(0));
+            if (kittyCode != null) {
+                if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "onKeyDown() kitty keyboard code: " + kittyCode);
+                mTermSession.write(kittyCode);
+                return true;
+            }
+        }
+
         // https://github.com/termux/termux-app/issues/731
         if (!event.isFunctionPressed() && handleKeyCode(keyCode, keyMod)) {
             if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "handleKeyCode() took key event");
@@ -911,6 +932,24 @@ public final class TerminalView extends View {
                 }
             }
 
+            // With the kitty keyboard protocol and the flag to report all keys, the text that a key
+            // produces is reported with the extended encoding as well. Only the events that come from a
+            // hardware keyboard are reported, so that text composed with a soft keyboard or an input
+            // method is still written as text.
+            final int kittyKeyboardFlags = (mEmulator == null) ? 0 : mEmulator.getKittyKeyboardFlags();
+            if ((kittyKeyboardFlags & KeyHandler.KITTY_KEYBOARD_FLAG_REPORT_ALL_KEYS_AS_ESCAPE_CODES) != 0
+                && eventSource > KEY_EVENT_SOURCE_SOFT_KEYBOARD) {
+                int keyMod = 0;
+                if (controlDown) keyMod |= KeyHandler.KEYMOD_CTRL;
+                if (altDown) keyMod |= KeyHandler.KEYMOD_ALT;
+                final String kittyCode = KeyHandler.getKittyKeyboardCode(0, keyMod, kittyKeyboardFlags,
+                    KeyHandler.KITTY_KEYBOARD_EVENT_TYPE_PRESS, codePoint);
+                if (kittyCode != null) {
+                    mTermSession.write(kittyCode);
+                    return;
+                }
+            }
+
             // If left alt, send escape before the code point to make e.g. Alt+B and Alt+F work in readline:
             mTermSession.writeCodePoint(altDown, codePoint);
         }
@@ -974,6 +1013,23 @@ public final class TerminalView extends View {
         } else if (event.isSystem()) {
             // Let system key events through.
             return super.onKeyUp(keyCode, event);
+        }
+
+        // Report the key release if the client asked for the event types with the kitty keyboard
+        // protocol, since a release does not produce a legacy code of its own.
+        if (mEmulator != null && mTermSession != null) {
+            final int kittyKeyboardFlags = mEmulator.getKittyKeyboardFlags();
+            if ((kittyKeyboardFlags & KeyHandler.KITTY_KEYBOARD_FLAG_REPORT_EVENT_TYPES) != 0) {
+                int keyMod = 0;
+                if (event.isCtrlPressed() || mClient.readControlKey()) keyMod |= KeyHandler.KEYMOD_CTRL;
+                if (event.isAltPressed() || mClient.readAltKey()) keyMod |= KeyHandler.KEYMOD_ALT;
+                if (event.isShiftPressed() || mClient.readShiftKey()) keyMod |= KeyHandler.KEYMOD_SHIFT;
+                if (event.isNumLockOn()) keyMod |= KeyHandler.KEYMOD_NUM_LOCK;
+
+                final String kittyCode = KeyHandler.getKittyKeyboardCode(keyCode, keyMod, kittyKeyboardFlags,
+                    KeyHandler.KITTY_KEYBOARD_EVENT_TYPE_RELEASE, event.getUnicodeChar(0));
+                if (kittyCode != null) mTermSession.write(kittyCode);
+            }
         }
 
         return true;

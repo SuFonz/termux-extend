@@ -140,6 +140,11 @@ public final class TermuxPropertyConstants {
 
 
 
+    /** Defines the key for whether the kitty keyboard protocol will be supported in the terminal */
+    public static final String KEY_KITTY_KEYBOARD =  "kitty-keyboard"; // Default: "kitty-keyboard"
+
+
+
     /** Defines the key for whether the {@link TermuxAmSocketServer} should be run at app startup */
     public static final String KEY_RUN_TERMUX_AM_SOCKET_SERVER =  "run-termux-am-socket-server"; // Default: "run-termux-am-socket-server"
 
@@ -407,6 +412,7 @@ public final class TermuxPropertyConstants {
         KEY_EXTRA_KEYS_TEXT_ALL_CAPS,
         KEY_HIDE_SOFT_KEYBOARD_ON_STARTUP,
         KEY_KITTY_GRAPHICS,
+        KEY_KITTY_KEYBOARD,
         KEY_RUN_TERMUX_AM_SOCKET_SERVER,
         KEY_TERMINAL_ONCLICK_URL_OPEN,
         KEY_USE_CTRL_SPACE_WORKAROUND,
@@ -455,6 +461,7 @@ public final class TermuxPropertyConstants {
         KEY_ENFORCE_CHAR_BASED_INPUT,
         KEY_HIDE_SOFT_KEYBOARD_ON_STARTUP,
         KEY_KITTY_GRAPHICS,
+        KEY_KITTY_KEYBOARD,
         KEY_TERMINAL_ONCLICK_URL_OPEN,
         KEY_USE_CTRL_SPACE_WORKAROUND,
         KEY_USE_FULLSCREEN,

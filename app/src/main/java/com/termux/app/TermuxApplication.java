@@ -44,6 +44,9 @@ public class TermuxApplication extends Application {
         // Set whether images using the kitty graphics protocol should be processed by the terminal
         TerminalEmulator.setKittyGraphicsEnabled(properties.isKittyGraphicsEnabled());
 
+        // Set whether the kitty keyboard protocol should be supported by the terminal
+        TerminalEmulator.setKittyKeyboardEnabled(properties.isKittyKeyboardEnabled());
+
         // Init app wide shell manager
         TermuxShellManager shellManager = TermuxShellManager.init(context);
 
