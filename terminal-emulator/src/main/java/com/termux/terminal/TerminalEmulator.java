@@ -820,6 +820,48 @@ public final class TerminalEmulator {
      * @param buffer a byte array containing the bytes to be processed
      * @param length the number of bytes in the array to process
      */
+    /**
+     * Whether the client asked for screen updates to be held back with the synchronized output mode
+     * (DECSET 2026), so that a burst of output is presented as a single update instead of one update
+     * per write, which would make the terminal redraw for every flush the application makes.
+     */
+    private boolean mSynchronizedOutputActive;
+
+    /** Whether a screen update was held back while the synchronized output mode was active. */
+    private boolean mScreenUpdateHeld;
+
+    /**
+     * Whether the synchronized output mode (DECSET 2026) is currently holding back screen updates.
+     *
+     * @return Returns {@code true} if updates are being held back.
+     */
+    public boolean isSynchronizedOutputActive() {
+        return mSynchronizedOutputActive;
+    }
+
+    /**
+     * Notify the client that the screen changed, unless the synchronized output mode is holding the
+     * updates back. In that case a single notification is sent when the mode is reset, see
+     * {@link #setSynchronizedOutput(boolean)}.
+     */
+    public void notifyScreenUpdate() {
+        if (mSynchronizedOutputActive) {
+            mScreenUpdateHeld = true;
+        } else {
+            mSession.onScreenUpdate();
+        }
+    }
+
+    /** Set or reset the synchronized output mode, see DECSET 2026. */
+    private void setSynchronizedOutput(boolean active) {
+        if (mSynchronizedOutputActive == active) return;
+        mSynchronizedOutputActive = active;
+        if (!active && mScreenUpdateHeld) {
+            mScreenUpdateHeld = false;
+            mSession.onScreenUpdate();
+        }
+    }
+
     public void append(byte[] buffer, int length) {
         // Collect unused bitmaps once per batch of output instead of once per code point, which would
         // mean acquiring the lock of the screen for every single character that is parsed.
@@ -895,35 +937,39 @@ public final class TerminalEmulator {
     }
 
     public void processCodePoint(int b) {
-        if (mEscapeState == ESC_OSC && mIsFastPathOsc) {
-            mContinueSequence = false;
-            receiveOsc(b);
-            if (!mContinueSequence) mEscapeState = ESC_NONE;
-            return;
-        }
-
-        if (mEscapeState == ESC_DCS && mIsFastPathDcs) {
-            if (b == 27) { // ESC
-                ESC_DCS__ESC = true;
+        // The escape state is almost always ESC_NONE for the printable output that dominates, so the
+        // checks for the string sequences are skipped with a single comparison instead of four.
+        if (mEscapeState != ESC_NONE) {
+            if (mEscapeState == ESC_OSC && mIsFastPathOsc) {
+                mContinueSequence = false;
+                receiveOsc(b);
+                if (!mContinueSequence) mEscapeState = ESC_NONE;
                 return;
             }
-            mContinueSequence = false;
-            doDcs(b);
-            if (!mContinueSequence) mEscapeState = ESC_NONE;
-            return;
-        }
 
-        // The Application Program-Control (APC) string might be arbitrary non-printable characters, so handle that early.
-        if (mEscapeState == ESC_APC) {
-            mContinueSequence = false;
-            receiveApc(b);
-            if (!mContinueSequence) mEscapeState = ESC_NONE;
-            return;
-        } else if (mEscapeState == ESC_APC__ESC) {
-            mContinueSequence = false;
-            receiveApcEsc(b);
-            if (!mContinueSequence) mEscapeState = ESC_NONE;
-            return;
+            if (mEscapeState == ESC_DCS && mIsFastPathDcs) {
+                if (b == 27) { // ESC
+                    ESC_DCS__ESC = true;
+                    return;
+                }
+                mContinueSequence = false;
+                doDcs(b);
+                if (!mContinueSequence) mEscapeState = ESC_NONE;
+                return;
+            }
+
+            // The Application Program-Control (APC) string might be arbitrary non-printable characters, so handle that early.
+            if (mEscapeState == ESC_APC) {
+                mContinueSequence = false;
+                receiveApc(b);
+                if (!mContinueSequence) mEscapeState = ESC_NONE;
+                return;
+            } else if (mEscapeState == ESC_APC__ESC) {
+                mContinueSequence = false;
+                receiveApcEsc(b);
+                if (!mContinueSequence) mEscapeState = ESC_NONE;
+                return;
+            }
         }
 
         switch (b) {
@@ -1985,6 +2031,9 @@ public final class TerminalEmulator {
                 else
                     restoreCursor();
                 break;
+            case 2026: // Synchronized output, so that a burst of output is presented as one update.
+                setSynchronizedOutput(setting);
+                break;
             case 47:
             case 1047:
             case 1049: {
@@ -2731,15 +2780,51 @@ public final class TerminalEmulator {
 
 
     /**
+     * Whether a code point aborts an {@link #ESC_APC} sequence that is being received, see
+     * {@link #receiveApc(int)}.
+     */
+    private static boolean isApcSequenceAbortCharacter(int b) {
+        switch (b) {
+            case 0:  // NUL
+            case 7:  // BEL, which terminates an OSC but is not a terminator for an APC.
+            case 10: // LF
+            case 13: // CR
+            case 24: // CAN, which cancels a sequence in ECMA-48.
+            case 26: // SUB, which cancels a sequence in ECMA-48.
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Abort an {@link #ESC_APC} sequence and handle the code point that aborted it as normal output.
+     */
+    private void abortApcSequence(int b) {
+        clearApcTypeVariables();
+        mEscapeState = ESC_NONE;
+        processCodePoint(b);
+    }
+
+    /**
      * Receive {@link #ESC_APC}. Check its docs for more info.
      */
     private void receiveApc(final int b) {
-        switch (b) {
-            case 27: // Escape.
-                continueSequence(ESC_APC__ESC);
-                break;
-            default:
-                if (!collectTerminalControlArgs(b)) return;
+        // A control character cannot be part of the payload of a command, and CAN and SUB cancel a
+        // sequence in ECMA-48. An application that is interrupted in the middle of sending a command,
+        // like when a SIGINT is delivered during a kitty graphics transfer, leaves the sequence
+        // unterminated, and every byte that the shell prints afterwards would be collected as payload.
+        // That leaves the terminal looking frozen until the payload reaches its size limit, so the
+        // sequence is aborted as soon as a control character arrives instead.
+        if (isApcSequenceAbortCharacter(b)) {
+            abortApcSequence(b);
+            return;
+        }
+
+        if (b == 27) { // Escape.
+            continueSequence(ESC_APC__ESC);
+        } else if (!collectTerminalControlArgs(b)) {
+            return;
         }
     }
 
@@ -2753,6 +2838,10 @@ public final class TerminalEmulator {
                 clearApcTypeVariables();
                 break;
             default:
+                if (isApcSequenceAbortCharacter(b)) {
+                    abortApcSequence(b);
+                    return;
+                }
                 // The ESC character was not followed by a \, so insert the ESC and
                 // the current character in arg buffer.
                 if (!collectTerminalControlArgs(27)) return;
@@ -3129,7 +3218,7 @@ public final class TerminalEmulator {
         if (currentFrameNumber > 0) image.setCurrentFrame(currentFrameNumber - 1);
 
         updateKittyImagePlacements(imageId, image.getBitmap());
-        mSession.onScreenUpdate();
+        notifyScreenUpdate();
         scheduleKittyAnimations();
 
         sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
@@ -3168,7 +3257,7 @@ public final class TerminalEmulator {
 
         mKittyImagesSize += image.getByteCount() - previousSize;
         updateKittyImagePlacements(imageId, image.getBitmap());
-        mSession.onScreenUpdate();
+        notifyScreenUpdate();
 
         sendKittyGraphicsResponse(graphics, TerminalKittyGraphics.RESPONSE_OK);
     }
@@ -3211,7 +3300,7 @@ public final class TerminalEmulator {
             updated = true;
         }
 
-        if (updated) mSession.onScreenUpdate();
+        if (updated) notifyScreenUpdate();
 
         scheduleKittyAnimations();
     }
@@ -4541,7 +4630,9 @@ public final class TerminalEmulator {
         // so was mCursorCol changed after the offsetDueToCombiningChar conditional by another thread?
         // TODO: Check if there are thread synchronization issues with mCursorCol and mCursorRow, possibly causing others bugs too.
         if (column < 0) column = 0;
-        mScreen.setChar(column, mCursorRow, codePoint, getStyle());
+        // The display width was already computed above, so it is passed on instead of being looked up
+        // again by the row for every written cell.
+        mScreen.setChar(column, mCursorRow, codePoint, getStyle(), displayWidth);
 
         if (autoWrap && displayWidth > 0)
             mAboutToAutoWrap = (mCursorCol == mRightMargin - displayWidth);
@@ -4604,6 +4695,10 @@ public final class TerminalEmulator {
         mArgIndex = 0;
         mContinueSequence = false;
         mEscapeState = ESC_NONE;
+        // The synchronized output mode is dropped by a reset too, otherwise updates would stay held
+        // back and the screen would never be redrawn again.
+        mSynchronizedOutputActive = false;
+        mScreenUpdateHeld = false;
         mInsertMode = false;
         mTopMargin = mLeftMargin = 0;
         mBottomMargin = mRows;

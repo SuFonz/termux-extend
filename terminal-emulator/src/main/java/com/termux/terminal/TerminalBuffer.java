@@ -241,8 +241,14 @@ public final class TerminalBuffer {
     public int externalToInternalRow(int externalRow) {
         if (externalRow < -mActiveTranscriptRows || externalRow > mScreenRows)
             throw new IllegalArgumentException("extRow=" + externalRow + ", mScreenRows=" + mScreenRows + ", mActiveTranscriptRows=" + mActiveTranscriptRows);
+        // A conditional add or subtract wraps into the ring instead of a modulo, which is a real
+        // division on ARM and is done for every cell that is written. One step is enough because
+        // mScreenFirstRow is less than mTotalRows and externalRow is at most mScreenRows, which is at
+        // most mTotalRows.
         final int internalRow = mScreenFirstRow + externalRow;
-        return (internalRow < 0) ? (mTotalRows + internalRow) : (internalRow % mTotalRows);
+        if (internalRow < 0) return mTotalRows + internalRow;
+        if (internalRow >= mTotalRows) return internalRow - mTotalRows;
+        return internalRow;
     }
 
     public void setLineWrap(int row) {
@@ -526,6 +532,20 @@ public final class TerminalBuffer {
             throw new IllegalArgumentException("TerminalBuffer.setChar(): row=" + row + ", column=" + column + ", mScreenRows=" + mScreenRows + ", mColumns=" + mColumns);
         row = externalToInternalRow(row);
         allocateFullLineIfNecessary(row).setChar(column, codePoint, style);
+    }
+
+    /**
+     * Same as {@link #setChar(int, int, int, long)}, but with the display width of the code point
+     * passed in so that it does not have to be looked up again, see
+     * {@link TerminalRow#setChar(int, int, long, int)}.
+     *
+     * @param codePointDisplayWidth The value of {@link WcWidth#width(int)} for {@code codePoint}.
+     */
+    public void setChar(int column, int row, int codePoint, long style, int codePointDisplayWidth) {
+        if (row  < 0 || row >= mScreenRows || column < 0 || column >= mColumns)
+            throw new IllegalArgumentException("TerminalBuffer.setChar(): row=" + row + ", column=" + column + ", mScreenRows=" + mScreenRows + ", mColumns=" + mColumns);
+        row = externalToInternalRow(row);
+        allocateFullLineIfNecessary(row).setChar(column, codePoint, style, codePointDisplayWidth);
     }
 
     public long getStyleAt(int externalRow, int column) {

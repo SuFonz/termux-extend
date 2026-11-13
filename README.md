@@ -2,7 +2,7 @@
 
 An unofficial, performance-focused build of the official [Termux](https://termux.dev) app, forked from [termux/termux-app](https://github.com/termux/termux-app) (`master` @ `8629e632`).
 
-The fork adds two commits on top of upstream: `108f11d5` (*rendering optimization*) and a **kitty graphics protocol** implementation, plus a **terminal emulator parsing optimization**. Everything else is upstream.
+The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **kitty graphics protocol** implementation, and a **performance pass** over the terminal emulator and the renderer, including support for the synchronized output mode. Everything else is upstream.
 
 > Not an official Termux release. Report fork-specific issues here, not upstream.
 
@@ -23,10 +23,14 @@ The fork adds two commits on top of upstream: `108f11d5` (*rendering optimizatio
 - **Single invalidation per scroll** — one `invalidate()` per batch instead of one per row.
 - **Java 17** — `app`, `terminal-emulator` and `terminal-view` now target Java 17.
 
-**Terminal emulator**
+**Terminal emulator and renderer**
 
 - **Column scan cache** — a row that holds a wide or a supplementary character cannot use the fast path of `TerminalRow.setChar()`, so it scanned the row from the first column to find the index of the column being written, once for the written cell and twice more to check for wide characters. That made writing such a row quadratic in the number of columns, and since a syntax highlighted application like LazyVim uses Nerd Font icons that live in the supplementary plane, nearly every row took that path. The scan now continues from where the previous one ended and starts over only when the text before that position changed. Measured on a 127 column row: 460 → 47 ns per cell, and the cost no longer grows with the column index.
+- **Per-character overhead** — the row index of the ring buffer is no longer wrapped with a modulo for every written cell, the display width of a code point is no longer looked up twice, and the checks for the string sequences are skipped with a single comparison instead of four while no escape sequence is being parsed.
+- **Reader thread** — a 64 KB read buffer, and a message is only queued when none is pending instead of one message per 4 KB read, which no longer floods the main thread while it is rendering a frame.
 - **Bitmap collection per batch** — unused `TerminalBitmap`s are collected once per `append()` batch instead of once per code point, which no longer takes the lock of the screen for every parsed character. The collection is throttled to once every 300 seconds, so its behaviour is unchanged.
+- **Paint color diffing** — the text color is pushed to `Paint` only when it changes, and a run no longer divides the accumulated width by the font width just to decide whether it needs to be scaled.
+- **Synchronized output** — the `CSI ? 2026 h` / `CSI ? 2026 l` (BSU/ESU) mode is supported, so a burst of output that an application wraps in it is presented as a single update instead of one update for every write the application makes.
 
 **Kitty graphics protocol**
 

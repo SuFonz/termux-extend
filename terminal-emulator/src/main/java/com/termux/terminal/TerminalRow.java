@@ -99,7 +99,7 @@ public final class TerminalRow {
                 sourceX1 += latestNonCombiningWidth;
                 latestNonCombiningWidth = w;
             }
-            setChar(destinationX, codePoint, line.getStyle(sourceX1));
+            setChar(destinationX, codePoint, line.getStyle(sourceX1), w);
         }
         // The source and the destination can be the same row, so the scan positions are dropped
         // instead of trying to track how they moved.
@@ -199,6 +199,17 @@ public final class TerminalRow {
 
     // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26
     public void setChar(int columnToSet, int codePoint, long style) {
+        setChar(columnToSet, codePoint, style, WcWidth.width(codePoint));
+    }
+
+    /**
+     * Same as {@link #setChar(int, int, long)}, but with the display width of the code point passed in
+     * so that it does not have to be looked up again by callers that already know it. The caller is
+     * only ever the one above and the parser, which both get the width from {@link WcWidth#width}.
+     *
+     * @param newCodePointDisplayWidth The value of {@link WcWidth#width(int)} for {@code codePoint}.
+     */
+    public void setChar(int columnToSet, int codePoint, long style, int newCodePointDisplayWidth) {
         if (columnToSet  < 0 || columnToSet >= mStyle.length)
             throw new IllegalArgumentException("TerminalRow.setChar(): columnToSet=" + columnToSet + ", codePoint=" + codePoint + ", style=" + style);
 
@@ -207,8 +218,6 @@ public final class TerminalRow {
         if (!mHasTerminalBitmap && TextStyle.isTerminalBitmap(style)) {
             mHasTerminalBitmap = true;
         }
-
-        final int newCodePointDisplayWidth = WcWidth.width(codePoint);
 
         // Fast path when we don't have any chars with width != 1
         if (!mHasNonOneWidthOrSurrogateChars) {

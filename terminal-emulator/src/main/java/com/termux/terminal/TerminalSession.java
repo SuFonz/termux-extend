@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * A terminal session, consisting of a process coupled to a terminal interface.
@@ -49,6 +50,13 @@ public final class TerminalSession extends TerminalOutput {
     final ByteQueue mTerminalToProcessIOQueue = new ByteQueue(4096);
     /** Buffer to write translate code points into utf8 before writing to mTerminalToProcessIOQueue */
     private final byte[] mUtf8InputBuffer = new byte[5];
+
+    /**
+     * Whether a {@link #MSG_NEW_INPUT} message is already queued. The handler drains the whole queue
+     * on every message, so the reader thread only has to post one while the main thread is busy,
+     * instead of one for every read.
+     */
+    private final AtomicBoolean mNewInputPending = new AtomicBoolean();
 
     /** Callback which gets notified when a session finishes or changes title. */
     TerminalSessionClient mClient;
@@ -134,12 +142,16 @@ public final class TerminalSession extends TerminalOutput {
             @Override
             public void run() {
                 try (InputStream termIn = new FileInputStream(terminalFileDescriptorWrapped)) {
-                    final byte[] buffer = new byte[4096];
+                    final byte[] buffer = new byte[64 * 1024];
                     while (true) {
                         int read = termIn.read(buffer);
                         if (read == -1) return;
                         if (!mProcessToTerminalIOQueue.write(buffer, 0, read)) return;
-                        mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT);
+                        // Only queue a message if none is pending, since the handler drains the whole
+                        // queue anyway and a message per read floods the main thread when it is busy.
+                        if (mNewInputPending.compareAndSet(false, true)) {
+                            mMainThreadHandler.sendEmptyMessage(MSG_NEW_INPUT);
+                        }
                     }
                 } catch (Exception e) {
                     // Ignore, just shutting down.
@@ -348,10 +360,16 @@ public final class TerminalSession extends TerminalOutput {
 
         @Override
         public void handleMessage(Message msg) {
+            // Allow the reader thread to post again before draining, so that output written while this
+            // batch is processed is not left in the queue without a message to pick it up.
+            mNewInputPending.set(false);
+
             int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
             if (bytesRead > 0) {
                 mEmulator.append(mReceiveBuffer, bytesRead);
-                notifyScreenUpdate();
+                // Respects the synchronized output mode (DECSET 2026), which holds the updates back
+                // so that a burst of output from the application is presented as a single update.
+                mEmulator.notifyScreenUpdate();
             }
 
             if (msg.what == MSG_PROCESS_EXITED) {

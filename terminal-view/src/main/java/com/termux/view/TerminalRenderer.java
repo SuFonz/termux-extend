@@ -70,6 +70,8 @@ public final class TerminalRenderer {
     private boolean mLastPaintUnderline;
     private boolean mLastPaintItalic;
     private boolean mLastPaintStrikeThrough;
+    /** The color as last set on {@link #mTextPaint}, see {@link #setPaintColor}. */
+    private int mLastPaintColor;
 
     public TerminalRenderer(int textSize, Typeface typeface) {
         mTextSize = textSize;
@@ -78,6 +80,7 @@ public final class TerminalRenderer {
         mTextPaint.setTypeface(typeface);
         mTextPaint.setAntiAlias(true);
         mTextPaint.setTextSize(textSize);
+        mLastPaintColor = mTextPaint.getColor();
 
         mFontLineSpacing = (int) Math.ceil(mTextPaint.getFontSpacing());
         mFontAscent = (int) Math.ceil(mTextPaint.ascent());
@@ -251,24 +254,28 @@ public final class TerminalRenderer {
         float left = startColumn * mFontWidth;
         float right = left + runWidthColumns * mFontWidth;
 
-        mes = mes / mFontWidth;
+        // Compare the accumulated width against the expected width in pixels instead of converting it
+        // to columns first, which would be a division for every run of every row even when the font
+        // is monospace and the widths agree.
+        final float expectedRunWidth = runWidthColumns * mFontWidth;
         boolean savedMatrix = false;
-        if (Math.abs(mes - runWidthColumns) > 0.01) {
+        if (Math.abs(mes - expectedRunWidth) > 0.01f * mFontWidth) {
+            final float scale = expectedRunWidth / mes;
             canvas.save();
-            canvas.scale(runWidthColumns / mes, 1.f);
-            left *= mes / runWidthColumns;
-            right *= mes / runWidthColumns;
+            canvas.scale(scale, 1.f);
+            left /= scale;
+            right /= scale;
             savedMatrix = true;
         }
 
         if (backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
             // Only draw non-default background.
-            mTextPaint.setColor(backColor);
+            setPaintColor(backColor);
             canvas.drawRect(left, y - mFontLineSpacingAndAscent + mFontAscent, right, y, mTextPaint);
         }
 
         if (cursor != 0) {
-            mTextPaint.setColor(cursor);
+            setPaintColor(cursor);
             float cursorHeight = mFontLineSpacingAndAscent - mFontAscent;
             if (cursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_UNDERLINE) cursorHeight /= 4.f;
             else if (cursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_BAR) right -= (((right - left) * 3) / 4.f);
@@ -288,7 +295,7 @@ public final class TerminalRenderer {
                 foreColor = 0xFF000000 + (red << 16) + (green << 8) + blue;
             }
 
-            mTextPaint.setColor(foreColor);
+            setPaintColor(foreColor);
 
             // Only update the effects that have changed since the last run to prevent redundant
             // calls to the native paint for each run.
@@ -318,6 +325,18 @@ public final class TerminalRenderer {
         }
 
         if (savedMatrix) canvas.restore();
+    }
+
+    /**
+     * Set the color of {@link #mTextPaint}, skipping the native call when the paint already has that
+     * color. Like the text effects, the color is set for every styled run of every row, and adjacent
+     * runs often share a color.
+     */
+    private void setPaintColor(int color) {
+        if (color != mLastPaintColor) {
+            mTextPaint.setColor(color);
+            mLastPaintColor = color;
+        }
     }
 
     /**
