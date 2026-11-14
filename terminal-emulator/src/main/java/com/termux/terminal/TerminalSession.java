@@ -142,7 +142,7 @@ public final class TerminalSession extends TerminalOutput {
             @Override
             public void run() {
                 try (InputStream termIn = new FileInputStream(terminalFileDescriptorWrapped)) {
-                    final byte[] buffer = new byte[64 * 1024];
+                    final byte[] buffer = new byte[4096];
                     while (true) {
                         int read = termIn.read(buffer);
                         if (read == -1) return;
