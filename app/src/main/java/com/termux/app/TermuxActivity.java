@@ -15,12 +15,14 @@ import android.os.IBinder;
 import android.view.ContextMenu;
 import android.view.ContextMenu.ContextMenuInfo;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ListView;
 import android.widget.RelativeLayout;
@@ -91,6 +93,14 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
      * The {@link TerminalView} shown in  {@link TermuxActivity} that displays the terminal.
      */
     TerminalView mTerminalView;
+
+    /**
+     * The video player that is shown over the terminal when the `termux-player` command plays a
+     * stream. It is {@code null} when the player is disabled with the `enable-player` property, or
+     * until the terminal view has been created.
+     */
+    @Nullable
+    TermuxPlayerView mTermuxPlayerView;
 
     /**
      *  The {@link TerminalViewClient} interface implementation to allow for communication between
@@ -300,6 +310,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             addTermuxActivityRootViewGlobalLayoutListener();
 
         registerTermuxActivityBroadcastReceiver();
+
+        if (mTermuxPlayerView != null) mTermuxPlayerView.register();
     }
 
     @Override
@@ -316,11 +328,26 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         if (mTermuxTerminalViewClient != null)
             mTermuxTerminalViewClient.onResume();
 
+        if (mTermuxPlayerView != null) mTermuxPlayerView.resume();
+
         // Check if a crash happened on last run of the app or if a plugin crashed and show a
         // notification with the crash details if it did
         TermuxCrashUtils.notifyAppCrashFromCrashLogFile(this, LOG_TAG);
 
         mIsOnResumeAfterOnCreate = false;
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+
+        Logger.logVerbose(LOG_TAG, "onPause");
+
+        if (mIsInvalidState) return;
+
+        // The video is paused while the activity is not in the foreground, so that it does not keep
+        // decoding and playing the sound while it is not visible.
+        if (mTermuxPlayerView != null) mTermuxPlayerView.pause();
     }
 
     @Override
@@ -352,6 +379,11 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         Logger.logDebug(LOG_TAG, "onDestroy");
 
         if (mIsInvalidState) return;
+
+        if (mTermuxPlayerView != null) {
+            mTermuxPlayerView.unregister();
+            mTermuxPlayerView = null;
+        }
 
         if (mTermuxService != null) {
             // Do not leave service and session clients with references to activity.
@@ -505,6 +537,30 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         if (mTermuxTerminalSessionActivityClient != null)
             mTermuxTerminalSessionActivityClient.onCreate();
+
+        setTermuxPlayerView();
+    }
+
+    /**
+     * Add the video player to the container of the terminal view, so that the player is shown inside
+     * the terminal instead of in a separate activity.
+     *
+     * <p>The player is only added when the `enable-player` property is set, since it holds a
+     * SurfaceView that the video decoder draws into, and a user that does not play any videos does
+     * not need it.</p>
+     */
+    private void setTermuxPlayerView() {
+        if (mProperties == null || !mProperties.isPlayerEnabled()) {
+            Logger.logDebug(LOG_TAG, "The video player is disabled with the \"enable-player\" property");
+            return;
+        }
+
+        final ViewGroup container = findViewById(R.id.terminal_view_container);
+        if (container == null) return;
+
+        mTermuxPlayerView = new TermuxPlayerView(this);
+        container.addView(mTermuxPlayerView.getView(), new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     private void setTermuxSessionsListView() {
@@ -608,9 +664,35 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
 
 
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // The player takes the input focus while it is shown, so that the input method is not active
+        // and the text keys reach the activity. The keys that control the player are intercepted
+        // here, before the focused view sees them, since it would otherwise consume the arrow keys
+        // and the space key itself. Every other key is left to the focused view, except for the key
+        // that stops the playback, which is sent to the shell because the shell is what runs the
+        // `termux-player` command and holds its foreground process group.
+        if (event.getAction() == KeyEvent.ACTION_DOWN && mTermuxPlayerView != null) {
+            if (mTermuxPlayerView.handleKeyDown(event.getKeyCode(), event)) return true;
+
+            if (mTermuxPlayerView.isPlaying()
+                && event.getKeyCode() == KeyEvent.KEYCODE_C
+                && event.isCtrlPressed()) {
+                final TerminalSession session = getCurrentSession();
+                if (session != null) session.write(new byte[]{3}, 0, 1);
+                return true;
+            }
+        }
+
+        return super.dispatchKeyEvent(event);
+    }
+
     @SuppressLint("RtlHardcoded")
     @Override
-    public void onBackPressed() {
+    public void onBackPressed() {        // The player is shown over the terminal in the same activity, so the back gesture closes the
+        // player and returns to the terminal instead of leaving the activity while a video is playing.
+        if (mTermuxPlayerView != null && mTermuxPlayerView.handleBackPressed()) return;
+
         if (getDrawer().isDrawerOpen(Gravity.LEFT)) {
             getDrawer().closeDrawers();
         } else {
@@ -889,6 +971,15 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
     public TerminalView getTerminalView() {
         return mTerminalView;
+    }
+
+    /**
+     * The video player that is shown over the terminal, or {@code null} when the player is disabled
+     * with the `enable-player` property or has not been created yet.
+     */
+    @Nullable
+    public TermuxPlayerView getTermuxPlayerView() {
+        return mTermuxPlayerView;
     }
 
     public TermuxTerminalViewClient getTermuxTerminalViewClient() {

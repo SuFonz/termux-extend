@@ -2,7 +2,7 @@
 
 An unofficial, performance-focused build of the official [Termux](https://termux.dev) app, forked from [termux/termux-app](https://github.com/termux/termux-app) (`master` @ `8629e632`).
 
-The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **kitty graphics protocol** implementation, a **kitty keyboard protocol** implementation, and a **performance pass** over the terminal emulator and the renderer, including support for the synchronized output mode. Everything else is upstream.
+The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **kitty graphics protocol** implementation, a **kitty keyboard protocol** implementation, a **`termux-player`** command for video and audio playback, and a **performance pass** over the terminal emulator and the renderer, including support for the synchronized output mode. Everything else is upstream.
 
 > Not an official Termux release. Report fork-specific issues here, not upstream.
 
@@ -65,6 +65,49 @@ The fork adds, on top of upstream: `108f11d5` (*rendering optimization*), a **ki
 - Off by default. Enable it in `~/.termux/termux.properties`:
 
     terminal-ime-composing = true
+
+  then run `termux-reload-settings`.
+
+**termux-player** (video and audio playback)
+
+A `termux-player` command that plays a video and audio stream in a full screen player shown over the
+terminal, with the sound. The player is drawn in the same activity, so switching to it looks like the
+terminal switching to a different screen, like the alternate screen buffer, instead of like switching
+to another application.
+
+```bash
+ffmpeg -i input.mp4 -c:v copy -c:a copy -f mpegts - | termux-player
+cat input.mp4 | termux-player
+termux-player input.mp4
+```
+
+- **Any stream the platform can decode.** The stream is written to a temporary file and decoded by
+  the platform media player, so MP4, MKV, WebM, TS and anything else the device supports plays, with
+  the sound. Nothing is re-encoded, so `-c:v copy -c:a copy` keeps the original quality.
+- **Ctrl+C stops the playback** and returns to the shell, like it stops any other command. The
+  command stays in the foreground while the stream is playing, so the shell is never left with a
+  detached player.
+- **Controls.** A control bar with previous, rewind, play or pause, forward, next and close buttons, a
+  progress bar and the time of the playback. A tap on the video shows or hides the controls, and the
+  button next to the hints shows the list of the keys.
+  - `←` / `→` rewind and forward 10 seconds, and the step grows while a key is held, up to 2 minutes
+    per step, so a long video can be moved through quickly.
+  - `↑` / `↓` move between the streams of a playlist.
+  - `Space` or `Enter` play or pause, `Esc` or back closes the player.
+  - The volume keys adjust the media volume instead of being used as the virtual control and
+    function keys of the terminal.
+- **A stream that has ended stays on its last frame** instead of closing the player, and pressing
+  play plays it again from the start.
+- **The player belongs to the session that started it**, so it is closed when another session is
+  shown, which also ends the command and returns the shell to its prompt.
+- The soft keyboard is hidden while the player is shown, since it resizes the activity and the
+  player is watched and not typed into.
+- Off by default, since the player holds a `SurfaceView` that a user that does not play any videos
+  does not need. Enable it in `~/.termux/termux.properties`:
+
+  ```properties
+  enable-player=true
+  ```
 
   then run `termux-reload-settings`.
 

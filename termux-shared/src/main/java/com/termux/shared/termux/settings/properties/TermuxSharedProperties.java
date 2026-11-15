@@ -618,6 +618,19 @@ public abstract class TermuxSharedProperties {
         return (boolean) getInternalPropertyValue(TermuxPropertyConstants.KEY_KITTY_KEYBOARD, true);
     }
 
+    /**
+     * Whether the `termux-player` command can play a stream in a surface that is shown over the
+     * terminal.
+     *
+     * <p>The player is drawn into a SurfaceView that is added over the terminal view, which is what
+     * lets the video decoder draw without the frames passing through the terminal buffers. The
+     * surface is only added when this is enabled, so that a user that does not play any videos does
+     * not pay for it.</p>
+     */
+    public boolean isPlayerEnabled() {
+        return (boolean) getInternalPropertyValue(TermuxPropertyConstants.KEY_ENABLE_PLAYER, true);
+    }
+
     public boolean shouldRunTermuxAmSocketServer() {
         return (boolean) getInternalPropertyValue(TermuxPropertyConstants.KEY_RUN_TERMUX_AM_SOCKET_SERVER, true);
     }

@@ -148,6 +148,14 @@ public final class TermuxPropertyConstants {
 
 
 
+    /**
+     * Defines the key for whether the `termux-player` command can play a stream in a surface that is
+     * shown over the terminal.
+     */
+    public static final String KEY_ENABLE_PLAYER =  "enable-player"; // Default: "enable-player"
+
+
+
     /** Defines the key for whether the {@link TermuxAmSocketServer} should be run at app startup */
     public static final String KEY_RUN_TERMUX_AM_SOCKET_SERVER =  "run-termux-am-socket-server"; // Default: "run-termux-am-socket-server"
 
@@ -416,6 +424,7 @@ public final class TermuxPropertyConstants {
         KEY_DISABLE_FILE_VIEW_RECEIVER,
         KEY_DISABLE_HARDWARE_KEYBOARD_SHORTCUTS,
         KEY_DISABLE_TERMINAL_SESSION_CHANGE_TOAST,
+        KEY_ENABLE_PLAYER,
         KEY_ENFORCE_CHAR_BASED_INPUT,
         KEY_EXTRA_KEYS_TEXT_ALL_CAPS,
         KEY_HIDE_SOFT_KEYBOARD_ON_STARTUP,
@@ -467,6 +476,7 @@ public final class TermuxPropertyConstants {
         KEY_DISABLE_FILE_VIEW_RECEIVER,
         KEY_DISABLE_HARDWARE_KEYBOARD_SHORTCUTS,
         KEY_DISABLE_TERMINAL_SESSION_CHANGE_TOAST,
+        KEY_ENABLE_PLAYER,
         KEY_ENFORCE_CHAR_BASED_INPUT,
         KEY_HIDE_SOFT_KEYBOARD_ON_STARTUP,
         KEY_KITTY_GRAPHICS,

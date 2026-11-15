@@ -293,6 +293,16 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
     public void setCurrentSession(TerminalSession session) {
         if (session == null) return;
 
+        // The video player belongs to the session that started the `termux-player` command, so it is
+        // closed when another session is shown. The video would otherwise cover the terminal of the
+        // new session, and the command that started it would keep running without being visible or
+        // being stoppable with Ctrl+C.
+        if (mActivity.getTermuxPlayerView() != null
+            && mActivity.getTermuxPlayerView().isPlaying()
+            && session != mActivity.getCurrentSession()) {
+            mActivity.getTermuxPlayerView().close();
+        }
+
         if (mActivity.getTerminalView().attachSession(session)) {
             // notify about switched session if not already displaying the session
             notifyOfSessionChange();

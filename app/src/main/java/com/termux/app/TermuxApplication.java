@@ -68,6 +68,11 @@ public class TermuxApplication extends Application {
 
             // Setup termux-am-socket server
             TermuxAmSocketServer.setupTermuxAmSocketServer(context);
+
+            // Install the shell commands that the app ships in its assets, which are not part of the
+            // bootstrap archive, so that the shell runs the version that the app was built with
+            // instead of an outdated copy that was installed by hand.
+            TermuxScriptInstaller.installIfNeeded(context);
         } else {
             Logger.logErrorExtended(LOG_TAG, "Termux files directory is not accessible\n" + error);
         }

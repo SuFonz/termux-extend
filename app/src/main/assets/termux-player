@@ -1,0 +1,257 @@
+#!/data/data/com.termux/files/usr/bin/bash
+##############################################################################
+# termux-player
+#
+# Play a video and audio stream that is received on standard input, in a full
+# screen player that is shown inside the terminal, with the sound.
+#
+# The player is shown over the terminal in the same activity, so it looks like
+# the terminal switching to another screen, like the alternate screen buffer of
+# a terminal, instead of like switching to another application. The command
+# stays in the foreground while the stream is playing, so pressing Ctrl+C stops
+# the playback and returns to the terminal, just like it stops any other
+# command.
+#
+# The stream is written to a file first, since the player decodes it with the
+# platform media player, which reads a file and not a pipe. Any container and
+# codec that the platform can decode is supported, which includes MP4, MKV,
+# WebM, TS and the streams produced by `ffmpeg -f mpegts -`.
+#
+# Usage:
+#   ffmpeg -i input.mp4 -c:v copy -c:a copy -f mpegts - | termux-player
+#   cat input.mp4 | termux-player
+#   termux-player < input.mp4
+#   termux-player input.mp4
+#
+# The player is disabled by default and is enabled with the `enable-player`
+# property in `~/.termux/termux.properties`.
+##############################################################################
+
+set -u
+
+SCRIPT_NAME="termux-player"
+
+## The action of the broadcast that starts the player.
+ACTION_PLAY="com.termux.app.TermuxPlayerView.PLAY"
+## The action of the broadcast that closes the player.
+ACTION_CLOSE="com.termux.app.TermuxPlayerView.CLOSE"
+## The extra of the broadcast that holds the path of the file to play.
+EXTRA_PATH="com.termux.app.TermuxPlayerView.PATH"
+## The extra of the broadcast that holds the title to show.
+EXTRA_TITLE="com.termux.app.TermuxPlayerView.TITLE"
+
+show_help() {
+    cat <<'HELP'
+Usage: termux-player [options] [FILE]
+
+Play a video and audio stream in a full screen player, with the sound.
+
+The stream is read from FILE, or from standard input when no file is given,
+which makes it possible to play the output of another command:
+
+  ffmpeg -i input.mp4 -c:v copy -c:a copy -f mpegts - | termux-player
+  cat input.mp4 | termux-player
+  termux-player input.mp4
+
+Press Ctrl+C to stop the playback and return to the terminal.
+
+Options:
+  -h, --help      Show this help.
+  -t, --title     The title to show while the stream is being prepared.
+  -q, --quiet     Do not show the progress while the stream is being read.
+
+The player is disabled by default. Enable it in ~/.termux/termux.properties
+with:
+
+  enable-player=true
+
+then run `termux-reload-settings`.
+HELP
+}
+
+## The title that is shown while the stream is being prepared.
+TITLE=""
+## The file to play, or an empty string to read the stream from standard input.
+INPUT_FILE=""
+## Whether the progress is shown while the stream is being read.
+QUIET=0
+
+process_arguments() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -t|--title)
+                if [ $# -lt 2 ]; then
+                    echo "$SCRIPT_NAME: The $1 option requires a value." 1>&2
+                    exit 1
+                fi
+                TITLE="$2"
+                shift 2
+                ;;
+            -q|--quiet)
+                QUIET=1
+                shift
+                ;;
+            -*)
+                echo "$SCRIPT_NAME: Unknown option \"$1\"." 1>&2
+                exit 1
+                ;;
+            *)
+                if [ -n "$INPUT_FILE" ]; then
+                    echo "$SCRIPT_NAME: Only one input file can be given." 1>&2
+                    exit 1
+                fi
+                INPUT_FILE="$1"
+                shift
+                ;;
+        esac
+    done
+}
+
+## Check that the player is enabled, which is what the `enable-player` property controls.
+check_player_enabled() {
+    local properties_file="${HOME}/.termux/termux.properties"
+
+    # The property is not required, and the player is disabled when it is missing, so a missing file
+    # or key means that the player is not available.
+    if [ ! -f "$properties_file" ]; then
+        return 1
+    fi
+
+    # The last assignment of the key wins, which is what the app does when it reads the file.
+    local enabled
+    enabled="$(sed -n 's/^[[:space:]]*enable-player[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' "$properties_file" | tail -n 1)"
+
+    [ "$enabled" = "true" ]
+}
+
+## Create the file that the stream is written to.
+create_stream_file() {
+    local stream_dir="${TMPDIR:-${PREFIX}/tmp}/termux-player"
+    mkdir -p "$stream_dir" || return 1
+
+    # The file name is unique per invocation so that multiple players can run at the same time, and
+    # it ends with the extension of the container that is most likely to be used, which is what the
+    # platform media player uses to pick a decoder.
+    mktemp "${stream_dir}/stream-XXXXXXXX.ts"
+}
+
+## Send a broadcast to the app that controls the player.
+send_broadcast() {
+    am broadcast --user current -a "$1" "${@:2}" > /dev/null 2>&1
+}
+
+## The file that the stream is written to, which is empty until it is created.
+STREAM_FILE=""
+## Whether the player has been started, after which the file belongs to the player.
+PLAYER_STARTED=0
+
+## Close the player and remove the stream file, which is run when the command exits.
+cleanup() {
+    # The player is closed only if it was started, since otherwise there is nothing to close.
+    if [ "$PLAYER_STARTED" = "1" ]; then
+        send_broadcast "$ACTION_CLOSE"
+        # The player deletes the file itself when it is closed, but it is removed here as well in
+        # case the player was not running anymore.
+        [ -n "$STREAM_FILE" ] && rm -f "$STREAM_FILE" 2>/dev/null
+    else
+        [ -n "$STREAM_FILE" ] && rm -f "$STREAM_FILE" 2>/dev/null
+    fi
+}
+
+main() {
+    process_arguments "$@"
+
+    if ! check_player_enabled; then
+        cat 1>&2 <<'ERROR'
+termux-player: The player is disabled.
+
+Enable it in ~/.termux/termux.properties with:
+
+  enable-player=true
+
+then run `termux-reload-settings` and try again.
+ERROR
+        exit 1
+    fi
+
+    STREAM_FILE="$(create_stream_file)" || {
+        echo "$SCRIPT_NAME: Failed to create the file to write the stream to." 1>&2
+        exit 1
+    }
+
+    # The player is closed and the file is removed however the command exits, which includes the
+    # Ctrl+C that stops the playback.
+    trap cleanup EXIT INT TERM HUP
+
+    if [ -n "$INPUT_FILE" ]; then
+        if [ ! -f "$INPUT_FILE" ]; then
+            echo "$SCRIPT_NAME: The file \"$INPUT_FILE\" does not exist." 1>&2
+            exit 1
+        fi
+        cp "$INPUT_FILE" "$STREAM_FILE" || {
+            echo "$SCRIPT_NAME: Failed to read the file \"$INPUT_FILE\"." 1>&2
+            exit 1
+        }
+    else
+        # The stream is only played once it has been fully received, since the platform media player
+        # reads a file and not a pipe.
+        if [ "$QUIET" = "1" ]; then
+            cat > "$STREAM_FILE" || {
+                echo "$SCRIPT_NAME: Failed to read the stream from standard input." 1>&2
+                exit 1
+            }
+        else
+            echo "$SCRIPT_NAME: Reading the stream, press Ctrl+C to stop..." 1>&2
+            cat > "$STREAM_FILE" || {
+                echo "$SCRIPT_NAME: Failed to read the stream from standard input." 1>&2
+                exit 1
+            }
+        fi
+    fi
+
+    if [ ! -s "$STREAM_FILE" ]; then
+        echo "$SCRIPT_NAME: The stream is empty." 1>&2
+        exit 1
+    fi
+
+    local stream_size
+    stream_size="$(stat -c %s "$STREAM_FILE" 2>/dev/null || echo 0)"
+
+    local title="$TITLE"
+    if [ -z "$title" ]; then
+        local human_size
+        human_size="$(numfmt --to=iec "$stream_size" 2>/dev/null || echo "${stream_size} bytes")"
+        title="termux-player ($human_size)"
+    fi
+
+    send_broadcast "$ACTION_PLAY" \
+        --es "$EXTRA_PATH" "$STREAM_FILE" \
+        --es "$EXTRA_TITLE" "$title" || {
+        echo "$SCRIPT_NAME: Failed to start the player." 1>&2
+        exit 1
+    }
+
+    PLAYER_STARTED=1
+
+    if [ "$QUIET" != "1" ]; then
+        echo "$SCRIPT_NAME: Playing, press Ctrl+C to stop." 1>&2
+    fi
+
+    # The command stays in the foreground while the stream is playing, so that Ctrl+C stops the
+    # playback and returns to the terminal, like it stops any other command. The player closes when
+    # the stream ends, and the command then exits as well.
+    while [ "$PLAYER_STARTED" = "1" ]; do
+        sleep 0.2
+        # The player deletes the file when it is closed, so the command exits once it is gone.
+        if [ ! -f "$STREAM_FILE" ]; then
+            PLAYER_STARTED=0
+            exit 0
+        fi
+    done
+}
+
+main "$@"
