@@ -32,7 +32,10 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.termux.shared.termux.TermuxConstants;
+
 import java.io.File;
+import java.io.FileWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -73,6 +76,19 @@ public final class TermuxPlayerView implements TextureView.SurfaceTextureListene
 
     /** The number of milliseconds that the playback position moves for a fast forward or rewind. */
     private static final long SEEK_STEP_MS = 10_000;
+
+    /**
+     * The path of the file that marks that a player exists and can be asked to play a stream.
+     *
+     * <p>The shell cannot look at the view hierarchy, so it cannot tell whether the player is there.
+     * The file is written by the app when it adds the player to the activity and holds the process id
+     * of the app, which lets a command verify that the app that wrote it is still running instead of
+     * trusting a file that was left behind when the app was killed. The command reads it instead of
+     * reading the `enable-player` property, since the property only says that the user wants the
+     * player, while the file says that it is actually there.</p>
+     */
+    public static final String READY_FILE_PATH =
+        TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/var/run/termux-player-ready";
 
     /**
      * The number of milliseconds after which a held arrow key starts to seek faster.
@@ -157,6 +173,40 @@ public final class TermuxPlayerView implements TextureView.SurfaceTextureListene
      * played again from the beginning, which is what pressing play does.
      */
     private boolean mEnded;
+
+    /**
+     * Mark that a player exists, so that a command can tell whether it can play a stream.
+     *
+     * <p>It is called when the player is added to the activity, since that is when the view that the
+     * video is drawn into exists and the broadcast of the command has something to reach.</p>
+     */
+    static void writeReadyFile() {
+        final File file = new File(READY_FILE_PATH);
+
+        try {
+            final File parent = file.getParentFile();
+            if (parent != null && !parent.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                parent.mkdirs();
+            }
+
+            final FileWriter writer = new FileWriter(file, false);
+            writer.write(String.valueOf(android.os.Process.myPid()));
+            writer.write("\n");
+            writer.close();
+
+            //noinspection ResultOfMethodCallIgnored
+            file.setReadable(true, true);
+        } catch (Throwable t) {
+            Log.e(LOG_TAG, "Failed to write the file that marks the player as ready: " + t.getMessage());
+        }
+    }
+
+    /** Remove the file that marks that a player exists, which is done when the player is destroyed. */
+    static void deleteReadyFile() {
+        //noinspection ResultOfMethodCallIgnored
+        new File(READY_FILE_PATH).delete();
+    }
 
     /** Whether the controls and the hints are shown, which is toggled by tapping the video. */
     private boolean mControlsVisible = true;

@@ -383,6 +383,8 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         if (mTermuxPlayerView != null) {
             mTermuxPlayerView.unregister();
             mTermuxPlayerView = null;
+            // The player is gone, so a command must not try to play a stream into it.
+            TermuxPlayerView.deleteReadyFile();
         }
 
         if (mTermuxService != null) {
@@ -552,6 +554,9 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     private void setTermuxPlayerView() {
         if (mProperties == null || !mProperties.isPlayerEnabled()) {
             Logger.logDebug(LOG_TAG, "The video player is disabled with the \"enable-player\" property");
+            // A file that was left behind by an earlier run is removed, so that the command does not
+            // try to play a stream into a player that is not there.
+            TermuxPlayerView.deleteReadyFile();
             return;
         }
 
@@ -561,6 +566,10 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         mTermuxPlayerView = new TermuxPlayerView(this);
         container.addView(mTermuxPlayerView.getView(), new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // The file marks that the player exists, so that the `termux-player` command can tell whether
+        // it can play a stream without having to read the property and hope that the app applied it.
+        TermuxPlayerView.writeReadyFile();
     }
 
     private void setTermuxSessionsListView() {
